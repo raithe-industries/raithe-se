@@ -38,8 +38,7 @@ warn() { echo -e "${YELLOW}! $1${RESET}"; }
 fail() { echo -e "${RED}✗ $1${RESET}"; exit 1; }
 skip() { echo -e "${GREEN}↷ $1 already correctly installed — skipping (use --force-install to reinstall)${RESET}"; }
 
-printf '%s\n' $'\
-\033[0;36m==============================================================================\033[0m
+printf '%s\n' $'
 \033[0;36m
                    ██████╗  █████╗ ██╗████████╗██╗  ██╗███████╗
                    ██╔══██╗██╔══██╗   \033[0;36m╚══██╔══╝██║  ██║██╔════╝
@@ -49,9 +48,7 @@ printf '%s\n' $'\
                    ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
                                    SEARCH ENGINE
 \033[0m
-\033[0;36m  RAiTHE — Production Entrypoint · Model Installer · Runtime\033[0m
-\033[0;36m  Author: Robert Perreault\033[0m
-\033[0;36m==============================================================================\033[0m
+\033[0;36m                              RUNTIME INITIALIZATION\033[0m
 '
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
