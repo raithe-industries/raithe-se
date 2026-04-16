@@ -1,6 +1,6 @@
 # raithe-se model files
 
-Run `install_models.sh` from the workspace root to download and install
+Run `raithe.sh` from the workspace root to download and install
 all three models automatically via optimum-cli.
 
 ## Expected layout (spec §7.1)
