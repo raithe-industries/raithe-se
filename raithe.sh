@@ -1,4 +1,4 @@
- #!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # ==============================================================================
@@ -97,14 +97,16 @@ ok "VRAM:        ${VRAM_GB} GB (GPU present: $( [[ $HAS_GPU -eq 1 ]] && echo yes
 # ── Generator selection ───────────────────────────────────────────────────────
 # (high-accuracy — RAM ≥ 64 GB, VRAM ≥ 16 GB)
 
-GENERATOR="Qwen2.5-7B-Instruct"
+GENERATOR_ID="Qwen/Qwen2.5-7B-Instruct"
+GENERATOR_DISPLAY="Qwen2.5-7B-Instruct"
 if [[ "$RAM_GB" -ge 64 && "$VRAM_GB" -ge 16 ]]; then
-    GENERATOR="Qwen2.5-14B-Instruct"
+    GENERATOR_ID="Qwen/Qwen2.5-14B-Instruct"
+    GENERATOR_DISPLAY="Qwen2.5-14B-Instruct"
     ok "AUTO-SELECT: Qwen2.5-14B (high-accuracy)"
 else
     ok "AUTO-SELECT: Qwen2.5-7B (balanced)"
 fi
-ok "CONFIRMED:   $GENERATOR"
+ok "CONFIRMED:   $GENERATOR_DISPLAY"
 
 # ==============================================================================
 # ORT SHARED LIBRARY
@@ -364,13 +366,12 @@ if [[ $RUN_ONLY -eq 0 ]]; then
 
         export_model "embedder"  "BAAI/bge-large-en-v1.5"
         export_model "reranker"  "BAAI/bge-reranker-large"
-        export_model "generator" "$GENERATOR"
+        export_model "generator" "$GENERATOR_ID"
 
         step "Final verification"
         ALL_OK=1
         for subdir in embedder reranker generator; do
             if model_is_valid "$subdir"; then
-                local onnx_b data_b total_mb
                 onnx_b=$(stat -c%s "$MODEL_BASE/$subdir/model.onnx")
                 data_b=0
                 [[ -f "$MODEL_BASE/$subdir/model.onnx_data" ]] \
@@ -388,7 +389,7 @@ if [[ $RUN_ONLY -eq 0 ]]; then
         done
         [[ $ALL_OK -eq 1 ]] || fail "Model stack verification failed"
         echo ""
-        ok "Model stack ready  ·  Generator: $GENERATOR"
+        ok "Model stack ready  ·  Generator: $GENERATOR_DISPLAY"
         echo ""
     else
         for subdir in embedder reranker generator; do
@@ -399,7 +400,7 @@ if [[ $RUN_ONLY -eq 0 ]]; then
             total_mb=$(( (onnx_b + data_b) / 1024 / 1024 ))
             ok "$subdir: ${total_mb} MB"
         done
-        ok "Model stack verified  ·  Generator: $GENERATOR"
+        ok "Model stack verified  ·  Generator: $GENERATOR_DISPLAY"
         echo ""
     fi
 fi

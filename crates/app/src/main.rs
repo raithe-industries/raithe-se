@@ -27,19 +27,6 @@ use raithe_serving::{AppState, Server};
 use raithe_session::SessionStore;
 use raithe_storage::{CrawlLog, DocStore};
 
-// ── RAiTHE startup banner ─────────────────────────────────────────────────────
-
-const BANNER: &str = r#"
-                         ██████╗  █████╗ ██╗████████╗██╗  ██╗███████╗
-                         ██╔══██╗██╔══██╗   ╚══██╔══╝██║  ██║██╔════╝
-                         ██████╔╝███████║██║   ██║   ███████║█████╗
-                         ██╔══██╗██╔══██║██║   ██║   ██╔══██║██╔══╝
-                         ██║  ██║██║  ██║██║   ██║   ██║  ██║███████╗
-                         ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
-                                         SEARCH ENGINE
-                          © RAiTHE INDUSTRIES INCORPORATED 2026
-"#;
-
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 struct Cli {
