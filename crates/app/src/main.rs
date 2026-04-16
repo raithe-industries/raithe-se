@@ -84,9 +84,6 @@ async fn main() -> Result<()> {
     // Step 1 — parse CLI arguments.
     let cli = Cli::parse();
 
-    // Step 2 — print banner.
-    println!("{BANNER}");
-
     // Step 3 — load Config.
     let config = Config::load(&cli.config_path)
         .with_context(|| format!("loading config from {}", cli.config_path.display()))?;

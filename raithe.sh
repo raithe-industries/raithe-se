@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+ #!/usr/bin/env bash
 set -euo pipefail
 
 # ==============================================================================
@@ -41,6 +41,18 @@ warn() { echo -e "${YELLOW}! $1${RESET}"; }
 fail() { echo -e "${RED}✗ $1${RESET}"; exit 1; }
 skip() { echo -e "${GREEN}↷ $1 — already installed (--force-install to reinstall)${RESET}"; }
 
+# Banner — printed once, first, before all operational output.
+echo -e "
+                         \033[1;37m██████╗  █████╗ ██╗████████╗██╗  ██╗███████╗\033[0m
+                         \033[1;37m██╔══██╗██╔══██╗   ╚══██╔══╝██║  ██║██╔════╝\033[0m
+                         \033[1;37m██████╔╝███████║██║   ██║   ███████║█████╗  \033[0m
+                         \033[1;37m██╔══██╗██╔══██║██║   ██║   ██╔══██║██╔══╝  \033[0m
+                         \033[1;37m██║  ██║██║  ██║██║   ██║   ██║  ██║███████╗\033[0m
+                         \033[1;37m╚═╝  ╚═╝╚═╝  ╚═╝╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝\033[0m
+                                         \033[0;36mSEARCH ENGINE\033[0m
+                            \033[0;36m© RAiTHE INDUSTRIES INCORPORATED 2026\033[0m
+"
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 INSTALL_ONLY=0
@@ -77,21 +89,22 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     HAS_GPU=1
 fi
 
-ok "RAM:       ${RAM_GB} GB"
-ok "CPU CORES: ${CPU_CORES}"
-ok "VRAM:      ${VRAM_GB} GB (GPU present: $( [[ $HAS_GPU -eq 1 ]] && echo yes || echo no ))"
-ok "FREE DISK: ${FREE_DISK_GB} GB"
+ok "CPU CORES:   ${CPU_CORES}"
+ok "RAM:         ${RAM_GB} GB"
+ok "FREE DISK:   ${FREE_DISK_GB} GB"
+ok "VRAM:        ${VRAM_GB} GB (GPU present: $( [[ $HAS_GPU -eq 1 ]] && echo yes || echo no ))"
 
 # ── Generator selection ───────────────────────────────────────────────────────
+# (high-accuracy — RAM ≥ 64 GB, VRAM ≥ 16 GB)
 
-GENERATOR="Qwen/Qwen2.5-7B-Instruct"
+GENERATOR="Qwen2.5-7B-Instruct"
 if [[ "$RAM_GB" -ge 64 && "$VRAM_GB" -ge 16 ]]; then
-    GENERATOR="Qwen/Qwen2.5-14B-Instruct"
-    ok "Auto-Select: Qwen2.5-14B (high-accuracy — RAM ≥ 64 GB, VRAM ≥ 16 GB)"
+    GENERATOR="Qwen2.5-14B-Instruct"
+    ok "AUTO-SELECT: Qwen2.5-14B (high-accuracy)"
 else
-    ok "Auto-Select: Qwen2.5-7B (balanced)"
+    ok "AUTO-SELECT: Qwen2.5-7B (balanced)"
 fi
-ok "CONFIRMED:  $GENERATOR"
+ok "CONFIRMED:   $GENERATOR"
 
 # ==============================================================================
 # ORT SHARED LIBRARY

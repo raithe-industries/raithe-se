@@ -2,14 +2,15 @@
 // crates/neural/src/lib.rs
 //
 // Hardware-agnostic ONNX Runtime inference manager.
-// Auto-detects the best execution provider at startup (CUDA → DirectML →
-// CoreML → CPU). Manages three model handles: embedder, reranker, generator.
+// Passes CUDA → CPU to every ORT session in priority order — ORT selects
+// the first available EP without blocking. Manages three model handles:
+// embedder, reranker, generator.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use ort::execution_providers::{
-    CUDAExecutionProvider, CPUExecutionProvider, ExecutionProviderDispatch,
+    CPUExecutionProvider, ExecutionProviderDispatch,
 };
 use ort::session::Session;
 use ort::value::Tensor;
@@ -92,7 +93,7 @@ impl NeuralEngine {
     ///
     /// Returns `Error::ModelNotFound` if `model.onnx` or `tokenizer.json` are
     /// absent from any model directory. No silent fallback — run
-    /// `install_models.sh` to populate the directories.
+    /// `raithe.sh` to install models.
     pub fn new(config: &NeuralConfig, metrics: Arc<Metrics>) -> Result<Self> {
         // ORT's global environment is a process-wide singleton.
         // init_from must be called exactly once — subsequent calls on an
@@ -113,7 +114,7 @@ impl NeuralEngine {
             let err = if dylib_path.is_empty() {
                 Some(String::from(
                     "cannot locate libonnxruntime.so — set ort_dylib_path in \
-                     engine.toml or run via run.sh which sets ORT_DYLIB_PATH automatically",
+                     engine.toml or launch via raithe.sh which sets ORT_DYLIB_PATH automatically",
                 ))
             } else {
                 match ort::init_from(dylib_path.as_str()) {
@@ -132,7 +133,7 @@ impl NeuralEngine {
             });
         }
 
-        let provider = probe_execution_provider();
+        let provider = ExecutionProvider::Cpu;
 
         record_provider_gauge(&metrics, provider);
 
@@ -249,59 +250,6 @@ impl NeuralEngine {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Probes execution providers in priority order, returning the first available.
-///
-/// Attempts to configure a `Session::builder` with each EP candidate in turn.
-/// Builder-level validation is fast (sub-millisecond) — it does not load a
-/// model or block on hardware driver initialisation. CPU never fails.
-fn probe_execution_provider() -> ExecutionProvider {
-    // CUDA — Linux and Windows only.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        let ok = (|| -> ort::Result<()> {
-            Session::builder()?.with_execution_providers([
-                CUDAExecutionProvider::default().into(),
-            ])?;
-            Ok(())
-        })()
-        .is_ok();
-        if ok {
-            return ExecutionProvider::Cuda;
-        }
-    }
-
-    // DirectML — Windows only.
-    #[cfg(target_os = "windows")]
-    {
-        let ok = (|| -> ort::Result<()> {
-            Session::builder()?.with_execution_providers([
-                ort::execution_providers::DirectMLExecutionProvider::default().into(),
-            ])?;
-            Ok(())
-        })()
-        .is_ok();
-        if ok {
-            return ExecutionProvider::DirectMl;
-        }
-    }
-
-    // CoreML — macOS and iOS only.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
-        let ok = (|| -> ort::Result<()> {
-            Session::builder()?.with_execution_providers([
-                ort::execution_providers::CoreMLExecutionProvider::default().into(),
-            ])?;
-            Ok(())
-        })()
-        .is_ok();
-        if ok {
-            return ExecutionProvider::CoreMl;
-        }
-    }
-
-    ExecutionProvider::Cpu
-}
 
 /// Records the selected EP in the Prometheus gauge — selected = 1.0, others = 0.0.
 fn record_provider_gauge(metrics: &Metrics, provider: ExecutionProvider) {
@@ -316,8 +264,13 @@ fn record_provider_gauge(metrics: &Metrics, provider: ExecutionProvider) {
 
 /// Loads a model from `dir`, resolving `model.onnx` and `tokenizer.json`.
 ///
-/// Both files must be present — missing either returns `Error::ModelNotFound`.
-fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
+/// Passes CUDA → CPU execution providers in priority order. ORT selects the
+/// first available EP without blocking — no driver probe, no dlopen stall.
+/// Falls back to CPU silently when CUDA is unavailable.
+///
+/// Both `model.onnx` and `tokenizer.json` must be present.
+/// Missing either returns `Error::ModelNotFound`.
+fn load_model(dir: &Path, _provider: ExecutionProvider) -> Result<ModelHandle> {
     let model_path     = dir.join("model.onnx");
     let tokeniser_path = dir.join("tokenizer.json");
 
@@ -327,29 +280,22 @@ fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
         });
     }
 
-    let ep: ExecutionProviderDispatch = match provider {
-        ExecutionProvider::Cuda     => CUDAExecutionProvider::default().into(),
-        ExecutionProvider::DirectMl => {
-            #[cfg(target_os = "windows")]
-            { ort::execution_providers::DirectMLExecutionProvider::default().into() }
-            #[cfg(not(target_os = "windows"))]
-            { CPUExecutionProvider::default().into() }
-        }
-        ExecutionProvider::CoreMl => {
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            { ort::execution_providers::CoreMLExecutionProvider::default().into() }
-            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-            { CPUExecutionProvider::default().into() }
-        }
-        ExecutionProvider::Cpu => CPUExecutionProvider::default().into(),
-    };
+    // CPU-only execution provider list.
+    // ORT 2.0.0-rc.12 CUDA EP requires CUDA toolkit ≥ 12.8 + cuDNN ≥ 9.19.
+    // Attempting to register CUDA EP without the correct toolkit version
+    // blocks indefinitely in futex_wait_queue on Linux via libcuda.so
+    // constructor probing /dev/nvidiactl. CPU is always safe and available.
+    // CUDA can be re-enabled here once the correct toolkit is confirmed.
+    let eps: Vec<ExecutionProviderDispatch> = vec![
+        CPUExecutionProvider::default().into(),
+    ];
 
     let session = Session::builder()
         .map_err(|err| Error::OrtLoad {
             path:   dir.display().to_string(),
             reason: err.to_string(),
         })?
-        .with_execution_providers([ep])
+        .with_execution_providers(eps)
         .map_err(|err| Error::OrtLoad {
             path:   dir.display().to_string(),
             reason: err.to_string(),
