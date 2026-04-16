@@ -23,17 +23,15 @@ gbdt_model_path  = "data/models/ranker/gbdt.model"
 [neural]
 # Absolute path to the ONNX Runtime shared library (libonnxruntime.so on Linux).
 # Leave empty to use the ORT_DYLIB_PATH environment variable instead.
-# run.sh sets ORT_DYLIB_PATH automatically from the ort build cache.
-# For manual override: find ~/.cache/ort.pyke.io -name "libonnxruntime.so*"
+# raithe.sh locates and exports ORT_DYLIB_PATH automatically.
+# Manual override: find ~/.cache/ort.pyke.io -name "libonnxruntime.so*"
 ort_dylib_path = ""
-# Base model directory
+# Base model directory — populated by raithe.sh on first run
 model_dir      = "data/models"
-# Per-model subdirectories — populated by install_models.sh
-# embedder:  BAAI/bge-large-en-v1.5       (feature-extraction, 1024-dim)
-# reranker:  BAAI/bge-reranker-large       (text-classification)
-# generator: Qwen/Qwen2.5-7B-Instruct     (text-generation, hardware-adaptive)
-#            Large LLMs export as model.onnx + model.onnx_data (external data).
-#            Both files must be present in the same directory.
+# embedder:  BAAI/bge-large-en-v1.5    (feature-extraction, 1024-dim)
+# reranker:  BAAI/bge-reranker-large   (text-classification)
+# generator: Qwen/Qwen2.5-7B-Instruct  (text-generation, hardware-adaptive)
+#            Exports as model.onnx + model.onnx_data (ONNX external data).
 embedder_dir   = "data/models/embedder"
 reranker_dir   = "data/models/reranker"
 generator_dir  = "data/models/generator"

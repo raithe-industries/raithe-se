@@ -19,6 +19,9 @@ set -euo pipefail
 #   2. ONNX model installation and validation
 #   3. ORT shared library location and environment setup
 #   4. Binary launch
+#
+# The raithe-se binary prints its own banner at startup.
+# This script prints only operational status lines.
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,20 +39,7 @@ sub()  { echo -e "  ${CYAN}·${RESET} $1"; }
 ok()   { echo -e "${GREEN}✓ $1${RESET}"; }
 warn() { echo -e "${YELLOW}! $1${RESET}"; }
 fail() { echo -e "${RED}✗ $1${RESET}"; exit 1; }
-skip() { echo -e "${GREEN}↷ $1 already correctly installed — skipping (use --force-install to reinstall)${RESET}"; }
-
-printf '%s\n' $'
-\033[0;36m
-                   ██████╗  █████╗ ██╗████████╗██╗  ██╗███████╗
-                   ██╔══██╗██╔══██╗   \033[0;36m╚══██╔══╝██║  ██║██╔════╝
-                   ██████╔╝███████║██║   ██║   ███████║█████╗
-                   ██╔══██╗██╔══██║██║   ██║   ██╔══██║██╔══╝
-                   ██║  ██║██║  ██║██║   ██║   ██║  ██║███████╗
-                   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
-                                   SEARCH ENGINE
-\033[0m
-\033[0;36m                              RUNTIME INITIALIZATION\033[0m
-'
+skip() { echo -e "${GREEN}↷ $1 — already installed (--force-install to reinstall)${RESET}"; }
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -81,7 +71,8 @@ VRAM_MB=0
 VRAM_GB=0
 HAS_GPU=0
 if command -v nvidia-smi >/dev/null 2>&1; then
-    VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "0")
+    VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+        | head -n1 || echo "0")
     VRAM_GB=$((VRAM_MB / 1024))
     HAS_GPU=1
 fi
@@ -96,11 +87,11 @@ ok "FREE DISK: ${FREE_DISK_GB} GB"
 GENERATOR="Qwen/Qwen2.5-7B-Instruct"
 if [[ "$RAM_GB" -ge 64 && "$VRAM_GB" -ge 16 ]]; then
     GENERATOR="Qwen/Qwen2.5-14B-Instruct"
-    ok "Auto-Select: Qwen2.5-14B (high-accuracy mode — RAM ≥ 64 GB, VRAM ≥ 16 GB)"
+    ok "Auto-Select: Qwen2.5-14B (high-accuracy — RAM ≥ 64 GB, VRAM ≥ 16 GB)"
 else
-    ok "Auto-Select: Qwen2.5-7B (balanced mode)"
+    ok "Auto-Select: Qwen2.5-7B (balanced)"
 fi
-ok "CONFIRMED: $GENERATOR"
+ok "CONFIRMED:  $GENERATOR"
 
 # ==============================================================================
 # ORT SHARED LIBRARY
@@ -114,11 +105,11 @@ ORT_SO=$(find "$ORT_CACHE" -name "libonnxruntime.so*" -not -name "*.lock" 2>/dev
 
 if [[ -z "$ORT_SO" ]]; then
     warn "libonnxruntime.so not found under $ORT_CACHE"
-    fail "Run 'cargo build --release' first — ort downloads the library automatically during build."
+    fail "Run 'cargo build --release' first — ort downloads the library automatically."
 fi
 
 export ORT_DYLIB_PATH="$ORT_SO"
-ok "ORT_DYLIB_PATH=$ORT_DYLIB_PATH"
+ok "ORT: $ORT_DYLIB_PATH"
 
 # ==============================================================================
 # BINARY CHECK
@@ -141,7 +132,8 @@ declare -A MODEL_MIN_BYTES=(
 
 get_task() {
     local model_id="$1"
-    if [[ "$model_id" == *"bge-large"* || "$model_id" == *"bge-base"* || "$model_id" == *"bge-small"* ]]; then
+    if [[ "$model_id" == *"bge-large"* || "$model_id" == *"bge-base"* \
+       || "$model_id" == *"bge-small"* ]]; then
         echo "feature-extraction"; return
     fi
     if [[ "$model_id" == *"reranker"* || "$model_id" == *"cross-encoder"* ]]; then
@@ -150,7 +142,8 @@ get_task() {
     if [[ "$model_id" == *"flan"* || "$model_id" == *"t5"* ]]; then
         echo "text2text-generation"; return
     fi
-    if [[ "$model_id" == *"Qwen"* || "$model_id" == *"Llama"* || "$model_id" == *"Mistral"* ]]; then
+    if [[ "$model_id" == *"Qwen"* || "$model_id" == *"Llama"* \
+       || "$model_id" == *"Mistral"* ]]; then
         echo "text-generation"; return
     fi
     echo "text-classification"
@@ -191,7 +184,7 @@ export_model() {
     model_class=$(get_model_class "$task")
 
     if [[ "$FORCE_INSTALL" -eq 0 ]] && model_is_valid "$subdir"; then
-        local total_mb onnx_b data_b
+        local onnx_b data_b total_mb
         onnx_b=$(stat -c%s "$dest/model.onnx")
         data_b=0
         [[ -f "$dest/model.onnx_data" ]] && data_b=$(stat -c%s "$dest/model.onnx_data")
@@ -200,14 +193,15 @@ export_model() {
         return
     fi
 
-    step "Exporting $subdir → $hf_id [$task] using $model_class"
+    step "Exporting $subdir → $hf_id  [$task]  $model_class"
 
     rm -rf "$work"
     mkdir -p "$work" "$dest"
 
     # ── Stage 1 — download ──────────────────────────────────────────────────
     sub "Stage 1/3 — downloading weights + tokenizer via $model_class"
-    sub "  CPU cores: ${CPU_CORES}  GPU: $( [[ $HAS_GPU -eq 1 ]] && echo "${VRAM_GB} GB VRAM" || echo none )"
+    sub "  CPU: ${CPU_CORES} cores  GPU: $( [[ $HAS_GPU -eq 1 ]] \
+        && echo "${VRAM_GB} GB VRAM" || echo none )"
 
     set +e
     OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
@@ -235,9 +229,8 @@ task     = "${task}"
 
 load_kwargs = {"trust_remote_code": True}
 if task == "text-generation":
-    # Load in bfloat16 to halve peak RAM during load (~14 GB for 7B).
-    # Do NOT use device_map — accelerate offloads to meta device which
-    # prevents model.to("cpu").float() from working.
+    # Load in bfloat16 to halve peak RAM (~14 GB for 7B).
+    # No device_map — accelerate meta device prevents model.to("cpu").float().
     load_kwargs["dtype"] = torch.bfloat16
 
 try:
@@ -247,7 +240,7 @@ try:
     if task == "text-generation":
         model = model.to("cpu").float()
     model.save_pretrained(path)
-    print(f"download OK: {model_id}", flush=True)
+    print(f"OK: {model_id}", flush=True)
 except Exception as e:
     print(f"DOWNLOAD_ERROR: {type(e).__name__}: {e}", file=sys.stderr); sys.exit(3)
 PYEOF
@@ -267,9 +260,9 @@ PYEOF
     rm -rf "$work/onnx"
     mkdir -p "$work/onnx"
 
-    # --monolith for encoders only. LLMs use external data format
-    # (model.onnx + model.onnx_data) — --monolith doubles peak RAM and
-    # produces corrupt output on constrained systems.
+    # --monolith for encoders only.
+    # LLMs use ONNX external data format (model.onnx + model.onnx_data) —
+    # --monolith on a 7B model doubles peak RAM and produces corrupt output.
     local export_flags="--framework pt --dtype fp32"
     [[ "$task" != "text-generation" ]] && export_flags="$export_flags --monolith"
 
@@ -296,28 +289,29 @@ PYEOF
     # ── Stage 3 — validate size, install ───────────────────────────────────
     sub "Stage 3/3 — validating and installing"
 
-    local onnx_file onnx_b data_b total_b total_mb min_mb
+    local onnx_file onnx_b data_b data_file total_b total_mb min_mb
     onnx_file=$(find "$work/onnx" -name "model.onnx" | head -n 1)
     onnx_b=$(stat -c%s "$onnx_file")
     data_b=0
-    local data_file
-    data_file=$(find "$work/onnx" \( -name "model.onnx_data" -o -name "*.onnx_data" \) 2>/dev/null | head -n 1 || true)
+    data_file=$(find "$work/onnx" \
+        \( -name "model.onnx_data" -o -name "*.onnx_data" \) 2>/dev/null \
+        | head -n 1 || true)
     [[ -n "$data_file" ]] && data_b=$(stat -c%s "$data_file")
     total_b=$(( onnx_b + data_b ))
     total_mb=$(( total_b / 1024 / 1024 ))
     min_mb=$(( ${MODEL_MIN_BYTES[$subdir]} / 1024 / 1024 ))
 
     if [[ $total_b -lt ${MODEL_MIN_BYTES[$subdir]} ]]; then
-        echo -e "${RED}✗ Export for $hf_id: ${total_mb} MB < ${min_mb} MB minimum${RESET}" >&2
+        echo -e "${RED}✗ $hf_id: ${total_mb} MB total < ${min_mb} MB minimum${RESET}" >&2
         cat "$work/export.log" >&2
         fail "Corrupt ONNX export for $hf_id (${total_mb} MB < ${min_mb} MB)"
     fi
-    ok "ONNX validated: ${total_mb} MB ≥ ${min_mb} MB minimum"
+    ok "Validated: ${total_mb} MB ≥ ${min_mb} MB minimum"
 
     cp "$onnx_file" "$dest/model.onnx"
     if [[ -n "$data_file" ]]; then
         cp "$data_file" "$dest/model.onnx_data"
-        ok "External weights installed: model.onnx_data ($(( data_b / 1024 / 1024 )) MB)"
+        ok "Installed: model.onnx_data ($(( data_b / 1024 / 1024 )) MB)"
     fi
 
     if [[ -f "$work/onnx/tokenizer.json" ]]; then
@@ -336,14 +330,17 @@ PYEOF
 if [[ $RUN_ONLY -eq 0 ]]; then
     step "Verifying model stack"
 
-    if [[ "$FORCE_INSTALL" -eq 1 ]] || ! model_is_valid embedder \
-        || ! model_is_valid reranker || ! model_is_valid generator; then
+    if [[ "$FORCE_INSTALL" -eq 1 ]] \
+        || ! model_is_valid embedder \
+        || ! model_is_valid reranker \
+        || ! model_is_valid generator; then
 
-        [[ "$FORCE_INSTALL" -eq 0 ]] && warn "Model stack incomplete or corrupt — installing"
+        [[ "$FORCE_INSTALL" -eq 0 ]] \
+            && warn "Model stack incomplete or corrupt — installing"
 
         command -v python3 >/dev/null || fail "python3 required for model installation"
         python3 -c "import transformers" 2>/dev/null || {
-            warn "Installing transformers/torch/optimum..."
+            warn "Installing Python dependencies..."
             pip install -U transformers torch huggingface_hub "optimum[exporters]" \
                 || fail "pip install failed"
         }
@@ -356,22 +353,21 @@ if [[ $RUN_ONLY -eq 0 ]]; then
         export_model "reranker"  "BAAI/bge-reranker-large"
         export_model "generator" "$GENERATOR"
 
-        # Final verification
-        step "Verifying installed model stack"
+        step "Final verification"
         ALL_OK=1
         for subdir in embedder reranker generator; do
             if model_is_valid "$subdir"; then
+                local onnx_b data_b total_mb
                 onnx_b=$(stat -c%s "$MODEL_BASE/$subdir/model.onnx")
                 data_b=0
                 [[ -f "$MODEL_BASE/$subdir/model.onnx_data" ]] \
                     && data_b=$(stat -c%s "$MODEL_BASE/$subdir/model.onnx_data")
                 total_mb=$(( (onnx_b + data_b) / 1024 / 1024 ))
                 if [[ -f "$MODEL_BASE/$subdir/model.onnx_data" ]]; then
-                    ok "$subdir/model.onnx + model.onnx_data (${total_mb} MB total)"
+                    ok "$subdir: model.onnx + model.onnx_data (${total_mb} MB)"
                 else
-                    ok "$subdir/model.onnx (${total_mb} MB)"
+                    ok "$subdir: model.onnx (${total_mb} MB)"
                 fi
-                ok "$subdir/tokenizer.json"
             else
                 echo -e "${RED}✗ $subdir failed validation${RESET}" >&2
                 ALL_OK=0
@@ -379,8 +375,7 @@ if [[ $RUN_ONLY -eq 0 ]]; then
         done
         [[ $ALL_OK -eq 1 ]] || fail "Model stack verification failed"
         echo ""
-        ok "Production model stack verified and ready"
-        echo -e "${CYAN}  Generator: $GENERATOR${RESET}"
+        ok "Model stack ready  ·  Generator: $GENERATOR"
         echo ""
     else
         for subdir in embedder reranker generator; do
@@ -391,12 +386,12 @@ if [[ $RUN_ONLY -eq 0 ]]; then
             total_mb=$(( (onnx_b + data_b) / 1024 / 1024 ))
             ok "$subdir: ${total_mb} MB"
         done
-        ok "Model stack verified"
+        ok "Model stack verified  ·  Generator: $GENERATOR"
         echo ""
     fi
 fi
 
-[[ $INSTALL_ONLY -eq 1 ]] && { ok "Done. Run ./raithe.sh to start."; exit 0; }
+[[ $INSTALL_ONLY -eq 1 ]] && { ok "Install complete."; exit 0; }
 
 # ==============================================================================
 # LAUNCH
