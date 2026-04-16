@@ -1,0 +1,26 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-neural"
+description = "Hardware-agnostic ONNX Runtime inference — auto-EP, 3 models"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+
+[dependencies]
+raithe-common  = { path = "../common" }
+raithe-config  = { path = "../config" }
+raithe-metrics = { path = "../metrics" }
+ort            = { workspace = true }
+tokenizers     = { workspace = true }
+tracing        = { workspace = true }
+thiserror      = { workspace = true }
+
+[dev-dependencies]
+tempfile  = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name    = "neural_embed_latency"
+harness = false

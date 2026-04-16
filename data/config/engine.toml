@@ -1,0 +1,46 @@
+# ==============================================================================
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+# raithe-se — Default Runtime Configuration
+# Spec §8 — load priority: defaults → this file → env vars → CLI arg
+# ==============================================================================
+
+[crawler]
+max_depth        = 6
+max_pages        = 1_000_000
+requests_per_sec = 2.0          # per host, enforced via governor
+min_seeds        = 100          # startup fails below this
+user_agent       = "raithe-se/1.0"
+
+[indexer]
+writer_heap_mb   = 1024         # prototype was 50 (DEV-007) — now 1 GB
+max_doc_id       = 9223372036854775807  # i64::MAX — TOML integer limit
+
+[ranker]
+gbdt_trees       = 300          # prototype was 10 (DEV-001)
+reranker_top_k   = 32           # prototype was 0 — never invoked (DEV-005)
+gbdt_model_path  = "data/models/ranker/gbdt.model"
+
+[neural]
+# Absolute path to the ONNX Runtime shared library (libonnxruntime.so on Linux).
+# Leave empty to use the ORT_DYLIB_PATH environment variable instead.
+# run.sh sets ORT_DYLIB_PATH automatically from the ort build cache.
+# For manual override: find ~/.cache/ort.pyke.io -name "libonnxruntime.so*"
+ort_dylib_path = ""
+# Base model directory
+model_dir      = "data/models"
+# Per-model subdirectories — populated by install_models.sh
+# embedder:  BAAI/bge-large-en-v1.5       (feature-extraction, 1024-dim)
+# reranker:  BAAI/bge-reranker-large       (text-classification)
+# generator: Qwen/Qwen2.5-7B-Instruct     (text-generation, hardware-adaptive)
+#            Large LLMs export as model.onnx + model.onnx_data (external data).
+#            Both files must be present in the same directory.
+embedder_dir   = "data/models/embedder"
+reranker_dir   = "data/models/reranker"
+generator_dir  = "data/models/generator"
+
+[serving]
+bind               = "0.0.0.0:8080"
+metrics_bind       = "0.0.0.0:9090"
+max_request_bytes  = 8192
+# Add your allowed origins here — never leave empty in production
+allowed_origins    = []

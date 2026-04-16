@@ -1,0 +1,147 @@
+# ==============================================================================
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+# raithe-se — Workspace Root
+# ==============================================================================
+
+[workspace]
+resolver = "2"
+members  = [
+    "crates/common",
+    "crates/config",
+    "crates/metrics",
+    "crates/storage",
+    "crates/crawler",
+    "crates/scraper",
+    "crates/parser",
+    "crates/indexer",
+    "crates/ranker",
+    "crates/query",
+    "crates/neural",
+    "crates/semantic",
+    "crates/instant",
+    "crates/linkgraph",
+    "crates/freshness",
+    "crates/session",
+    "crates/serving",
+    "crates/app",
+]
+
+[workspace.package]
+version     = "0.1.0"
+edition     = "2021"
+license     = "LicenseRef-Proprietary"
+authors     = ["Robert Rolland \"Stone\" Perreault <robert@raithe.ca>"]
+repository  = "https://github.com/raithe-industries/raithe-search-engine"
+description = "raithe-se — world-class search engine by RAiTHE INDUSTRIES INCORPORATED"
+
+# ==============================================================================
+# Shared dependency versions — all crates use { workspace = true }
+# ==============================================================================
+[workspace.dependencies]
+
+tempfile = "3.27"
+
+#Neural
+tokenizers = { version = "0.20", features = ["http"] }
+
+# ── Async runtime ──────────────────────────────────────────────────────────────
+tokio            = { version = "1.37", features = ["full"] }
+
+# ── HTTP client (scraper) ──────────────────────────────────────────────────────
+reqwest          = { version = "0.12", default-features = false, features = [
+                     "rustls-tls", "gzip", "brotli", "http2", "stream"] }
+
+# ── HTML parsing ──────────────────────────────────────────────────────────────
+lol_html         = "1.2"
+scraper          = "0.19"    # fallback parser only
+
+# ── Text processing ────────────────────────────────────────────────────────────
+unicode-segmentation  = "1.11"
+unicode-normalization = "0.1"
+rust-stemmers         = "1.2"
+
+# ── Full-text index ────────────────────────────────────────────────────────────
+tantivy          = "0.22"
+
+# ── Compression ───────────────────────────────────────────────────────────────
+zstd             = "0.13"
+
+# ── HTTP serving ──────────────────────────────────────────────────────────────
+axum             = { version = "0.7", features = ["http2"] }
+tower            = "0.4"
+tower-http       = { version = "0.5", features = [
+                     "cors", "compression-full", "trace", "timeout",
+                     "request-id", "limit"] }
+
+# ── Templating ─────────────────────────────────────────────────────────────────
+askama           = "0.12"
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+prometheus       = "0.13"
+
+# ── Tracing / logging ─────────────────────────────────────────────────────────
+tracing              = "0.1"
+tracing-subscriber   = { version = "0.3", features = ["json", "env-filter"] }
+
+# ── Config ────────────────────────────────────────────────────────────────────
+figment          = { version = "0.10", features = ["toml", "env"] }
+notify           = "6.0"
+
+# ── Storage / frontier ────────────────────────────────────────────────────────
+rusqlite         = { version = "0.31", features = ["bundled"] }
+memmap2          = "0.9"
+
+# ── Cache / rate-limiting ─────────────────────────────────────────────────────
+moka             = { version = "0.12", features = ["future", "sync"] }
+governor         = "0.6"
+
+# ── Error handling ────────────────────────────────────────────────────────────
+thiserror        = "1.0"
+anyhow           = "1.0"     # permitted in crates/app ONLY
+
+# ── GBDT / LambdaMART (Phase 2 ranker) ───────────────────────────────────────
+gbdt             = "0.1.2"
+
+# ── ONNX Runtime (neural — hardware-agnostic, load-dynamic) ──────────────────
+ort              = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+ORT_LIB_LOCATION    = "/home/stone/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6e7848acdb7284feb44e2781583a90e820839767459ad8fa2abf7dd63b731fd9"
+ORT_PREFER_DYNAMIC_LINK = "1"
+LD_LIBRARY_PATH     = "/home/stone/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6e7848acdb7284feb44e2781583a90e820839767459ad8fa2abf7dd63b731fd9"
+
+# ── Instant answers ───────────────────────────────────────────────────────────
+evalexpr         = "11.0"
+
+# ── DNS ───────────────────────────────────────────────────────────────────────
+trust-dns-resolver = "0.23"
+
+# ── Serialisation ─────────────────────────────────────────────────────────────
+serde            = { version = "1.0", features = ["derive"] }
+serde_json       = "1.0"
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+bytes            = "1.6"
+chrono           = { version = "0.4", features = ["serde"] }
+uuid             = { version = "1.0", features = ["v4"] }
+url              = "2.5"
+rand             = "0.8"
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+criterion        = { version = "0.5", features = ["html_reports"] }
+
+# ==============================================================================
+# Profiles
+# ==============================================================================
+[profile.release]
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+strip         = "symbols"
+opt-level     = 3
+
+[profile.bench]
+inherits = "release"
+debug    = true     # for flamegraphs
+
+[profile.dev]
+opt-level = 1
+debug     = 2

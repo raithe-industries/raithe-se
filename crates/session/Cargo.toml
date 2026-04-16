@@ -1,0 +1,16 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-session"
+description = "In-memory session context — query history, reformulation detection"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+authors.workspace   = true
+repository.workspace = true
+
+[dependencies]
+raithe-common  = { path = "../common" }
+raithe-config  = { path = "../config" }
+moka           = { workspace = true }
+uuid           = { workspace = true }
+thiserror      = { workspace = true }

@@ -1,0 +1,21 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-storage"
+description = "All durable I/O — crawl log, doc store, mmap, backups"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+
+[dependencies]
+raithe-common = { path = "../common" }
+raithe-config = { path = "../config" }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+zstd          = { workspace = true }
+memmap2       = { workspace = true }
+thiserror     = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

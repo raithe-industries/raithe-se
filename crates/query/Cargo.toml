@@ -1,0 +1,23 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-query"
+description = "Query understanding — tokenise, spell-correct, intent, synonyms, rewrite"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+authors.workspace   = true
+repository.workspace = true
+
+[dependencies]
+raithe-common  = { path = "../common" }
+raithe-config  = { path = "../config" }
+raithe-metrics = { path = "../metrics" }
+raithe-neural  = { path = "../neural" }
+thiserror      = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name    = "query_latency"
+harness = false

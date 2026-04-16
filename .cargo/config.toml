@@ -1,0 +1,11 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+# .cargo/config.toml
+#
+# Forces GNU linker for debug builds.
+# ort-sys 2.0.0-rc.12 static archive references glibc 2.38 C23 symbols
+# (__isoc23_strtol*) that lld does not resolve in debug mode on this system.
+# Release builds are unaffected — they link correctly with lld via LTO.
+
+[target.x86_64-unknown-linux-gnu]
+linker = "/usr/bin/x86_64-linux-gnu-gcc"
+rustflags = ["-C", "linker-flavor=gcc"]
