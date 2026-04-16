@@ -2,9 +2,10 @@
 // crates/neural/src/lib.rs
 //
 // Hardware-agnostic ONNX Runtime inference manager.
-// Passes CUDA → CPU to every ORT session in priority order — ORT selects
-// the first available EP without blocking. Manages three model handles:
-// embedder, reranker, generator.
+// ORT_DYLIB_PATH is set by raithe.sh before exec — no explicit init_from
+// call is made (it deadlocks on Linux with NVIDIA drivers via libcuda.so).
+// CPU-only EP; CUDA re-enablement requires CUDA toolkit ≥ 12.8 + cuDNN ≥ 9.19.
+// Manages three model handles: embedder, reranker, generator.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -95,41 +96,23 @@ impl NeuralEngine {
     /// absent from any model directory. No silent fallback — run
     /// `raithe.sh` to install models.
     pub fn new(config: &NeuralConfig, metrics: Arc<Metrics>) -> Result<Self> {
-        // ORT's global environment is a process-wide singleton.
-        // init_from must be called exactly once — subsequent calls on an
-        // already-initialised environment deadlock on ORT's internal mutex.
-        // Use Once to guarantee single initialisation regardless of how many
-        // NeuralEngine instances are constructed.
-        static ORT_INIT: std::sync::Once = std::sync::Once::new();
-        static ORT_INIT_RESULT: std::sync::OnceLock<Option<String>> =
-            std::sync::OnceLock::new();
-
-        ORT_INIT.call_once(|| {
-            let dylib_path = if !config.ort_dylib_path.as_os_str().is_empty() {
-                config.ort_dylib_path.to_string_lossy().into_owned()
-            } else {
-                std::env::var("ORT_DYLIB_PATH").unwrap_or_default()
-            };
-
-            let err = if dylib_path.is_empty() {
-                Some(String::from(
-                    "cannot locate libonnxruntime.so — set ort_dylib_path in \
-                     engine.toml or launch via raithe.sh which sets ORT_DYLIB_PATH automatically",
-                ))
-            } else {
-                match ort::init_from(dylib_path.as_str()) {
-                    Ok(builder) => { builder.commit(); None }
-                    Err(err)    => Some(err.to_string()),
-                }
-            };
-
-            ORT_INIT_RESULT.set(err).ok();
-        });
-
-        if let Some(Some(reason)) = ORT_INIT_RESULT.get() {
+        // ORT_DYLIB_PATH is set by raithe.sh before exec. With load-dynamic,
+        // ORT resolves the library path from that env var on first session
+        // creation. No explicit init_from call is needed or safe here —
+        // calling init_from triggers ORT's global Env constructor which
+        // spawns an inter-op thread pool that deadlocks on Linux systems
+        // with NVIDIA drivers present via libcuda.so constructor.
+        //
+        // Validate the path is set so failure is diagnosed immediately.
+        if config.ort_dylib_path.as_os_str().is_empty()
+            && std::env::var("ORT_DYLIB_PATH").unwrap_or_default().is_empty()
+        {
             return Err(Error::OrtLoad {
-                path:   config.ort_dylib_path.display().to_string(),
-                reason: reason.clone(),
+                path:   String::from("(none)"),
+                reason: String::from(
+                    "ORT_DYLIB_PATH not set — launch via raithe.sh which \
+                     locates and exports the ORT shared library automatically",
+                ),
             });
         }
 
@@ -264,10 +247,8 @@ fn record_provider_gauge(metrics: &Metrics, provider: ExecutionProvider) {
 
 /// Loads a model from `dir`, resolving `model.onnx` and `tokenizer.json`.
 ///
-/// Passes CUDA → CPU execution providers in priority order. ORT selects the
-/// first available EP without blocking — no driver probe, no dlopen stall.
-/// Falls back to CPU silently when CUDA is unavailable.
-///
+/// Uses CPU execution provider only. CUDA EP registration blocks indefinitely
+/// on Linux systems with NVIDIA drivers but without CUDA toolkit ≥ 12.8.
 /// Both `model.onnx` and `tokenizer.json` must be present.
 /// Missing either returns `Error::ModelNotFound`.
 fn load_model(dir: &Path, _provider: ExecutionProvider) -> Result<ModelHandle> {
@@ -414,10 +395,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "probes ORT execution providers via FFI — run manually: cargo test -p raithe-neural -- --ignored"]
-    fn probe_returns_a_valid_provider() {
-        let provider = probe_execution_provider();
-        assert!(["cuda", "directml", "coreml", "cpu"].contains(&provider.label()));
+    #[ignore = "requires ORT shared library — run manually: cargo test -p raithe-neural -- --ignored"]
+    fn provider_is_cpu_without_cuda_toolkit() {
+        // On systems without CUDA toolkit ≥ 12.8, the active provider is CPU.
+        assert_eq!(ExecutionProvider::Cpu.label(), "cpu");
     }
 
     #[test]
