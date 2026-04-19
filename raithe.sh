@@ -246,7 +246,7 @@ load_kwargs = {"trust_remote_code": True}
 if task == "text-generation":
     # Load in bfloat16 to halve peak RAM (~14 GB for 7B).
     # No device_map — accelerate meta device prevents model.to("cpu").float().
-    load_kwargs["dtype"] = torch.bfloat16
+    load_kwargs["torch_dtype"] = torch.bfloat16
 
 try:
     tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -275,21 +275,71 @@ PYEOF
     rm -rf "$work/onnx"
     mkdir -p "$work/onnx"
 
-    # --monolith for encoders only.
-    # LLMs use ONNX external data format (model.onnx + model.onnx_data) —
-    # --monolith on a 7B model doubles peak RAM and produces corrupt output.
-    local export_flags="--framework pt --dtype fp32"
-    [[ "$task" != "text-generation" ]] && export_flags="$export_flags --monolith"
+    if [[ "$task" == "text-generation" ]]; then
+        set +e
+        OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
+        python3 - >"$work/export.log" 2>&1 <<PYEOF
+import os, sys, warnings, logging
+from pathlib import Path
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TQDM_DISABLE"]           = "1"
+os.environ["OMP_NUM_THREADS"]        = "${CPU_CORES}"
+os.environ["MKL_NUM_THREADS"]        = "${CPU_CORES}"
+warnings.filterwarnings("ignore")
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("optimum").setLevel(logging.ERROR)
 
-    # shellcheck disable=SC2086
-    OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
-    optimum-cli export onnx \
-        -m "$work" --task "$task" $export_flags "$work/onnx" \
-        >"$work/export.log" 2>&1 || {
-        echo -e "${RED}✗ ONNX export failed for $hf_id${RESET}" >&2
-        cat "$work/export.log" >&2
-        fail "ONNX export failed for $hf_id ($task)"
-    }
+try:
+    from transformers import AutoModelForCausalLM, AutoConfig
+    from optimum.exporters.onnx import export
+    from optimum.exporters.tasks import TasksManager
+except ImportError as e:
+    print(f"IMPORT_ERROR: {e}", file=sys.stderr); sys.exit(2)
+
+work = Path("${work}")
+out_dir = work / "onnx"
+out_dir.mkdir(parents=True, exist_ok=True)
+
+try:
+    hf_config = AutoConfig.from_pretrained(str(work), trust_remote_code=True)
+    onnx_config_ctor = TasksManager._SUPPORTED_MODEL_TYPE["qwen2"]["onnx"]["text-generation"]
+    onnx_config = onnx_config_ctor(hf_config)
+    model = AutoModelForCausalLM.from_pretrained(
+        str(work),
+        trust_remote_code=True,
+        torch_dtype="auto",
+    )
+    model.eval()
+    export(
+        model=model,
+        config=onnx_config,
+        output=out_dir / "model.onnx",
+        device="cpu",
+    )
+    print("OK", flush=True)
+except Exception as e:
+    print(f"EXPORT_ERROR: {type(e).__name__}: {e}", file=sys.stderr); sys.exit(3)
+PYEOF
+        export_rc=$?
+        set -e
+        if [[ $export_rc -ne 0 ]]; then
+            echo -e "${RED}✗ ONNX export failed for $hf_id — exit $export_rc${RESET}" >&2
+            cat "$work/export.log" >&2
+            fail "ONNX export failed for $hf_id ($task)"
+        fi
+    else
+        # Encoders — CLI path with --monolith (fits within 2 GiB).
+        local export_flags="--framework pt --dtype fp32 --monolith"
+        # shellcheck disable=SC2086
+        OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
+        optimum-cli export onnx \
+            -m "$work" --task "$task" $export_flags "$work/onnx" \
+            >"$work/export.log" 2>&1 || {
+            echo -e "${RED}✗ ONNX export failed for $hf_id${RESET}" >&2
+            cat "$work/export.log" >&2
+            fail "ONNX export failed for $hf_id ($task)"
+        }
+    fi
 
     local onnx_check
     onnx_check=$(find "$work/onnx" -name "model.onnx" -size +0c | head -n 1 || true)
@@ -354,14 +404,22 @@ if [[ $RUN_ONLY -eq 0 ]]; then
             && warn "Model stack incomplete or corrupt — installing"
 
         command -v python3 >/dev/null || fail "python3 required for model installation"
-        python3 -c "import transformers" 2>/dev/null || {
+        python3 -c "import transformers, optimum, torch" 2>/dev/null || {
             warn "Installing Python dependencies..."
-            pip install -U transformers torch huggingface_hub "optimum[exporters]" \
+            pip install --quiet \
+                "optimum[exporters]==1.23.3" \
+                "transformers==4.46.3" \
+                "torch==2.5.1+cpu" \
+                "onnxscript" \
+                "onnx" \
+                "onnxruntime" \
+                huggingface_hub \
+                -f https://download.pytorch.org/whl/torch_stable.html \
                 || fail "pip install failed"
         }
-        command -v optimum-cli >/dev/null || {
-            pip install -U "optimum[exporters]" || fail "optimum install failed"
-        }
+        export PATH="$HOME/.local/bin:$PATH"
+        command -v optimum-cli >/dev/null 2>&1 \
+            || fail "optimum-cli not found — ensure ~/.local/bin is on PATH"
         mkdir -p "$MODEL_BASE"
 
         export_model "embedder"  "BAAI/bge-large-en-v1.5"
