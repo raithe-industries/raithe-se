@@ -15,18 +15,21 @@ set -euo pipefail
 #   ./raithe.sh --config <path>    # passed through to raithe-se binary
 #
 # This script is the sole operational entrypoint. It owns:
-#   1. Hardware detection and generator selection
-#   2. ONNX model installation and validation
-#   3. ORT shared library location and environment setup
-#   4. Binary launch
-#
-# The raithe-se binary prints its own banner at startup.
-# This script prints only operational status lines.
+#   1. System preflight (apt deps, pip, PATH)
+#   2. Hardware detection and generator selection
+#   3. ORT shared library — auto-download if missing
+#   4. ONNX model installation and validation
+#   5. Binary launch
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY="$SCRIPT_DIR/target/release/raithe-se"
 MODEL_BASE="$SCRIPT_DIR/data/models"
+
+ORT_VERSION="1.20.1"
+ORT_CACHE="${HOME}/.cache/ort.pyke.io"
+ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -41,7 +44,6 @@ warn() { echo -e "${YELLOW}! $1${RESET}"; }
 fail() { echo -e "${RED}✗ $1${RESET}"; exit 1; }
 skip() { echo -e "${GREEN}↷ $1 — already installed (--force-install to reinstall)${RESET}"; }
 
-# Banner — printed once, first, before all operational output.
 echo -e "
                          \033[1;37m██████╗  █████╗ ██╗████████╗██╗  ██╗███████╗\033[0m
                          \033[1;37m██╔══██╗██╔══██╗   ╚══██╔══╝██║  ██║██╔════╝\033[0m
@@ -70,6 +72,36 @@ for arg in "$@"; do
 done
 
 # ==============================================================================
+# PREFLIGHT — system deps, pip, PATH
+# ==============================================================================
+
+step "Preflight checks"
+
+# Ensure ~/.local/bin on PATH (pip --user installs land here)
+export PATH="$HOME/.local/bin:$PATH"
+
+# apt packages required on fresh Ubuntu 24.04
+APT_NEEDED=()
+for pkg in python3 python3-pip pkg-config build-essential wget; do
+    command -v "$pkg" >/dev/null 2>&1 || dpkg -s "$pkg" >/dev/null 2>&1 || APT_NEEDED+=("$pkg")
+done
+# libssl-dev checked via dpkg
+dpkg -s libssl-dev >/dev/null 2>&1 || APT_NEEDED+=("libssl-dev")
+
+if [[ ${#APT_NEEDED[@]} -gt 0 ]]; then
+    warn "Installing apt packages: ${APT_NEEDED[*]}"
+    sudo apt-get install -y "${APT_NEEDED[@]}" \
+        || fail "apt install failed for: ${APT_NEEDED[*]}"
+fi
+ok "System packages present"
+
+# Ensure ~/.local/bin in ~/.bashrc for future shells
+grep -q 'HOME/.local/bin' ~/.bashrc \
+    || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+
+ok "PATH: $HOME/.local/bin included"
+
+# ==============================================================================
 # SYSTEM DETECTION
 # ==============================================================================
 
@@ -94,9 +126,6 @@ ok "RAM:         ${RAM_GB} GB"
 ok "FREE DISK:   ${FREE_DISK_GB} GB"
 ok "VRAM:        ${VRAM_GB} GB (GPU present: $( [[ $HAS_GPU -eq 1 ]] && echo yes || echo no ))"
 
-# ── Generator selection ───────────────────────────────────────────────────────
-# (high-accuracy — RAM ≥ 64 GB, VRAM ≥ 16 GB)
-
 GENERATOR_ID="Qwen/Qwen2.5-7B-Instruct"
 GENERATOR_DISPLAY="Qwen2.5-7B-Instruct"
 if [[ "$RAM_GB" -ge 64 && "$VRAM_GB" -ge 16 ]]; then
@@ -109,18 +138,28 @@ fi
 ok "CONFIRMED:   $GENERATOR_DISPLAY"
 
 # ==============================================================================
-# ORT SHARED LIBRARY
+# ORT SHARED LIBRARY — auto-download if missing
 # ==============================================================================
 
 step "Locating ONNX Runtime shared library"
 
-ORT_CACHE="${HOME}/.cache/ort.pyke.io"
 ORT_SO=$(find "$ORT_CACHE" -name "libonnxruntime.so*" -not -name "*.lock" 2>/dev/null \
     | sort -V | tail -n1 || true)
 
 if [[ -z "$ORT_SO" ]]; then
-    warn "libonnxruntime.so not found under $ORT_CACHE"
-    fail "Run 'cargo build --release' first — ort downloads the library automatically."
+    warn "libonnxruntime.so not found — downloading ORT v${ORT_VERSION}"
+    mkdir -p "$ORT_CACHE"
+    TMP_TAR="/tmp/${ORT_TARBALL}"
+    wget -q --show-progress "$ORT_URL" -O "$TMP_TAR" \
+        || fail "Failed to download ORT from $ORT_URL"
+    tar -xzf "$TMP_TAR" -C /tmp
+    cp "/tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION}" \
+        "$ORT_CACHE/"
+    ln -sf "$ORT_CACHE/libonnxruntime.so.${ORT_VERSION}" \
+           "$ORT_CACHE/libonnxruntime.so"
+    rm -f "$TMP_TAR"
+    ORT_SO="$ORT_CACHE/libonnxruntime.so.${ORT_VERSION}"
+    ok "ORT downloaded and cached"
 fi
 
 export ORT_DYLIB_PATH="$ORT_SO"
@@ -138,7 +177,6 @@ fi
 # MODEL INSTALLATION / VALIDATION
 # ==============================================================================
 
-# Minimum combined (model.onnx + model.onnx_data) sizes in bytes.
 declare -A MODEL_MIN_BYTES=(
     [embedder]=$((1200  * 1024 * 1024))
     [reranker]=$((1800  * 1024 * 1024))
@@ -244,8 +282,6 @@ task     = "${task}"
 
 load_kwargs = {"trust_remote_code": True}
 if task == "text-generation":
-    # Load in bfloat16 to halve peak RAM (~14 GB for 7B).
-    # No device_map — accelerate meta device prevents model.to("cpu").float().
     load_kwargs["torch_dtype"] = torch.bfloat16
 
 try:
@@ -276,6 +312,10 @@ PYEOF
     mkdir -p "$work/onnx"
 
     if [[ "$task" == "text-generation" ]]; then
+        # >2GB protobuf wall is hit during torch.onnx shape inference pass,
+        # BEFORE file write — so use_external_data_format=True alone fails.
+        # Fix: disable shape inference globally, then export to file path,
+        # then re-save with proper external data split via onnx.save_model.
         set +e
         OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
         python3 - >"$work/export.log" 2>&1 <<PYEOF
@@ -288,10 +328,13 @@ os.environ["MKL_NUM_THREADS"]        = "${CPU_CORES}"
 warnings.filterwarnings("ignore")
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("optimum").setLevel(logging.ERROR)
+logging.getLogger("torch").setLevel(logging.ERROR)
 
 try:
+    import torch
+    import torch.onnx._globals as onnx_globals
+    import onnx
     from transformers import AutoModelForCausalLM, AutoConfig
-    from optimum.exporters.onnx import export
     from optimum.exporters.tasks import TasksManager
 except ImportError as e:
     print(f"IMPORT_ERROR: {e}", file=sys.stderr); sys.exit(2)
@@ -299,25 +342,53 @@ except ImportError as e:
 work = Path("${work}")
 out_dir = work / "onnx"
 out_dir.mkdir(parents=True, exist_ok=True)
+out_path = out_dir / "model.onnx"
+
+# Kill the shape inference pass — this is what triggers the 2GB protobuf serialize
+onnx_globals.GLOBALS.onnx_shape_inference = False
 
 try:
     hf_config = AutoConfig.from_pretrained(str(work), trust_remote_code=True)
-    onnx_config_ctor = TasksManager._SUPPORTED_MODEL_TYPE["qwen2"]["onnx"]["text-generation"]
-    onnx_config = onnx_config_ctor(hf_config)
+    onnx_config_ctor = TasksManager._SUPPORTED_MODEL_TYPE["qwen2"]["onnx"]["text-generation-with-past"]
+    onnx_config = onnx_config_ctor(hf_config, use_past=True)
+
     model = AutoModelForCausalLM.from_pretrained(
-        str(work),
-        trust_remote_code=True,
-        torch_dtype="auto",
+        str(work), trust_remote_code=True, torch_dtype=torch.float32,
     )
     model.eval()
-    export(
-        model=model,
-        config=onnx_config,
-        output=out_dir / "model.onnx",
-        device="cpu",
+
+    dummy_inputs = onnx_config.generate_dummy_inputs(framework="pt")
+    input_names = list(dummy_inputs.keys())
+    output_names = list(onnx_config.outputs.keys())
+    dynamic_axes = {**onnx_config.inputs, **onnx_config.outputs}
+
+    with torch.no_grad():
+        torch.onnx.export(
+            model,
+            tuple(dummy_inputs.values()),
+            str(out_path),
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            opset_version=14,
+            do_constant_folding=False,
+            use_external_data_format=True,
+        )
+
+    # Re-save to guarantee proper external data layout (single file, no threshold)
+    m = onnx.load(str(out_path), load_external_data=True)
+    onnx.save_model(
+        m,
+        str(out_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="model.onnx_data",
+        size_threshold=0,
+        convert_attribute=False,
     )
     print("OK", flush=True)
 except Exception as e:
+    import traceback; traceback.print_exc()
     print(f"EXPORT_ERROR: {type(e).__name__}: {e}", file=sys.stderr); sys.exit(3)
 PYEOF
         export_rc=$?
@@ -327,8 +398,7 @@ PYEOF
             cat "$work/export.log" >&2
             fail "ONNX export failed for $hf_id ($task)"
         fi
-    else
-        # Encoders — CLI path with --monolith (fits within 2 GiB).
+        else
         local export_flags="--framework pt --dtype fp32 --monolith"
         # shellcheck disable=SC2086
         OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
@@ -342,9 +412,9 @@ PYEOF
     fi
 
     local onnx_check
-    onnx_check=$(find "$work/onnx" -name "model.onnx" -size +0c | head -n 1 || true)
+    onnx_check=$(find "$work/onnx" -name "*.onnx" -size +0c | head -n 1 || true)
     if [[ -z "$onnx_check" ]]; then
-        echo -e "${RED}✗ optimum exited 0 but model.onnx is missing or empty${RESET}" >&2
+        echo -e "${RED}✗ optimum exited 0 but no .onnx files found${RESET}" >&2
         cat "$work/export.log" >&2
         ls -lah "$work/onnx/" >&2
         fail "optimum produced no output for $hf_id"
@@ -354,37 +424,34 @@ PYEOF
     # ── Stage 3 — validate size, install ───────────────────────────────────
     sub "Stage 3/3 — validating and installing"
 
-    local onnx_file onnx_b data_b data_file total_b total_mb min_mb
-    onnx_file=$(find "$work/onnx" -name "model.onnx" | head -n 1)
-    onnx_b=$(stat -c%s "$onnx_file")
-    data_b=0
-    data_file=$(find "$work/onnx" \
-        \( -name "model.onnx_data" -o -name "*.onnx_data" \) 2>/dev/null \
-        | head -n 1 || true)
-    [[ -n "$data_file" ]] && data_b=$(stat -c%s "$data_file")
-    total_b=$(( onnx_b + data_b ))
+    local total_b total_mb min_mb
+    total_b=$(find "$work/onnx" -type f | xargs stat -c%s 2>/dev/null | awk '{s+=$1} END{print s+0}')
     total_mb=$(( total_b / 1024 / 1024 ))
     min_mb=$(( ${MODEL_MIN_BYTES[$subdir]} / 1024 / 1024 ))
 
     if [[ $total_b -lt ${MODEL_MIN_BYTES[$subdir]} ]]; then
         echo -e "${RED}✗ $hf_id: ${total_mb} MB total < ${min_mb} MB minimum${RESET}" >&2
-        cat "$work/export.log" >&2
         fail "Corrupt ONNX export for $hf_id (${total_mb} MB < ${min_mb} MB)"
     fi
     ok "Validated: ${total_mb} MB ≥ ${min_mb} MB minimum"
 
-    cp "$onnx_file" "$dest/model.onnx"
-    if [[ -n "$data_file" ]]; then
-        cp "$data_file" "$dest/model.onnx_data"
-        ok "Installed: model.onnx_data ($(( data_b / 1024 / 1024 )) MB)"
+    # Copy all exported files into dest
+    cp -r "$work/onnx"/. "$dest/"
+
+    # Ensure tokenizer.json present
+    if [[ ! -f "$dest/tokenizer.json" ]]; then
+        if [[ -f "$work/tokenizer.json" ]]; then
+            cp "$work/tokenizer.json" "$dest/tokenizer.json"
+        else
+            fail "Missing tokenizer.json for $hf_id"
+        fi
     fi
 
-    if [[ -f "$work/onnx/tokenizer.json" ]]; then
-        cp "$work/onnx/tokenizer.json" "$dest/tokenizer.json"
-    elif [[ -f "$work/tokenizer.json" ]]; then
-        cp "$work/tokenizer.json" "$dest/tokenizer.json"
-    else
-        fail "Missing tokenizer.json for $hf_id"
+    # Encoders: ensure canonical model.onnx symlink if absent
+    if [[ ! -f "$dest/model.onnx" ]]; then
+        local first_onnx
+        first_onnx=$(find "$dest" -name "*.onnx" | sort | head -n 1 || true)
+        [[ -n "$first_onnx" ]] && ln -sf "$(basename "$first_onnx")" "$dest/model.onnx" || true
     fi
 
     rm -rf "$work"
@@ -404,22 +471,25 @@ if [[ $RUN_ONLY -eq 0 ]]; then
             && warn "Model stack incomplete or corrupt — installing"
 
         command -v python3 >/dev/null || fail "python3 required for model installation"
+
         python3 -c "import transformers, optimum, torch" 2>/dev/null || {
             warn "Installing Python dependencies..."
-            pip install --quiet \
+            pip3 install --quiet --break-system-packages \
                 "optimum[exporters]==1.23.3" \
                 "transformers==4.46.3" \
-                "torch==2.5.1+cpu" \
+                "torch==2.5.1" \
                 "onnxscript" \
                 "onnx" \
                 "onnxruntime" \
                 huggingface_hub \
-                -f https://download.pytorch.org/whl/torch_stable.html \
                 || fail "pip install failed"
         }
+
+        # Re-export PATH after pip install in case optimum-cli just landed
         export PATH="$HOME/.local/bin:$PATH"
         command -v optimum-cli >/dev/null 2>&1 \
             || fail "optimum-cli not found — ensure ~/.local/bin is on PATH"
+
         mkdir -p "$MODEL_BASE"
 
         export_model "embedder"  "BAAI/bge-large-en-v1.5"

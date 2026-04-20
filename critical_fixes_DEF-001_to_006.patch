@@ -1,0 +1,844 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index a7dad53..7ffea03 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -103,10 +103,9 @@ anyhow           = "1.0"     # permitted in crates/app ONLY
+ gbdt             = "0.1.2"
+ 
+ # ── ONNX Runtime (neural — hardware-agnostic, load-dynamic) ──────────────────
++# ORT_DYLIB_PATH is exported by raithe.sh at launch. See .cargo/config.toml
++# for environment configuration. Env-var keys must NOT appear here (DEF-001).
+ ort              = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+-ORT_LIB_LOCATION    = "/home/stone/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6e7848acdb7284feb44e2781583a90e820839767459ad8fa2abf7dd63b731fd9"
+-ORT_PREFER_DYNAMIC_LINK = "1"
+-LD_LIBRARY_PATH     = "/home/stone/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6e7848acdb7284feb44e2781583a90e820839767459ad8fa2abf7dd63b731fd9"
+ 
+ # ── Instant answers ───────────────────────────────────────────────────────────
+ evalexpr         = "11.0"
+diff --git a/crates/app/src/main.rs b/crates/app/src/main.rs
+index 879ab64..9492e76 100644
+--- a/crates/app/src/main.rs
++++ b/crates/app/src/main.rs
+@@ -231,11 +231,25 @@ async fn main() -> Result<()> {
+             let mut neural     = neural_for_index;
+             let parser         = Parser::new();
+ 
++            // URL → DocumentId resolver for link-graph edge construction.
++            // Outlinks whose destinations are not yet indexed are parked in
++            // `pending_outlinks` keyed by the unresolved URL. When that URL
++            // is later crawled and indexed, the parked sources are drained
++            // and wired via `LinkGraph::add_edge` (DEF-006).
++            let mut url_to_id: std::collections::HashMap<raithe_common::Url, raithe_common::DocumentId>
++                = std::collections::HashMap::new();
++            let mut pending_outlinks: std::collections::HashMap<raithe_common::Url, Vec<raithe_common::DocumentId>>
++                = std::collections::HashMap::new();
++            // Monotonic document-id counter. `DocumentId::ZERO` is the sentinel
++            // for "unassigned" — the first real id is ONE. Overflow returns
++            // `Error::DocIdExhausted` via `DocumentId::next` (§9.1).
++            let mut next_doc_id: raithe_common::DocumentId = raithe_common::DocumentId::ZERO;
++
+             tokio::spawn(async move {
+                 while let Some((fetch_result, depth)) = fetch_rx.recv().await {
+                     let url = fetch_result.url.clone();
+ 
+-                    let doc = match parser.parse(fetch_result) {
++                    let mut doc = match parser.parse(fetch_result) {
+                         Ok(d)  => d,
+                         Err(e) => {
+                             tracing::warn!(%url, error = %e, "parse failed — skipping");
+@@ -243,6 +257,17 @@ async fn main() -> Result<()> {
+                         }
+                     };
+ 
++                    match next_doc_id.next() {
++                        Some(id) => {
++                            next_doc_id = id;
++                            doc.id      = id;
++                        }
++                        None => {
++                            tracing::error!("document id space exhausted — halting indexing");
++                            break;
++                        }
++                    }
++
+                     if let Err(e) = indexer.add(&doc) {
+                         tracing::warn!(%url, error = %e, "indexer add failed");
+                     }
+@@ -261,15 +286,34 @@ async fn main() -> Result<()> {
+                         Err(e) => tracing::warn!(%url, error = %e, "embed failed"),
+                     }
+ 
++                    // LinkGraph wiring (DEF-006). Three passes per document:
++                    //   1. Register this doc's URL → id so later docs that
++                    //      link to it can be resolved immediately.
++                    //   2. Drain any previously-parked sources that had this
++                    //      URL as their outlink — add the now-resolvable edges.
++                    //   3. For each outlink of the current doc: add an edge if
++                    //      the destination is known, else park it.
+                     {
++                        url_to_id.insert(doc.url.clone(), doc.id);
++
+                         let mut graph = link_graph.lock()
+                             .unwrap_or_else(|p| p.into_inner());
+-                        // Record outbound edges from this document.
+-                        // dst IDs are only available once the destination is
+-                        // indexed. Edges where dst is not yet indexed are
+-                        // omitted here and recorded when the destination
+-                        // document is later crawled and indexed.
+-                        let _ = (doc.id, &doc.outlinks, &mut graph);
++
++                        if let Some(sources) = pending_outlinks.remove(&doc.url) {
++                            for src_id in sources {
++                                graph.add_edge(src_id, doc.id);
++                            }
++                        }
++
++                        for outlink in &doc.outlinks {
++                            match url_to_id.get(outlink).copied() {
++                                Some(dst_id) => graph.add_edge(doc.id, dst_id),
++                                None         => pending_outlinks
++                                    .entry(outlink.clone())
++                                    .or_default()
++                                    .push(doc.id),
++                            }
++                        }
+                     }
+ 
+                     if depth < max_depth {
+@@ -308,6 +352,7 @@ async fn main() -> Result<()> {
+     let app_state = Arc::new(AppState {
+         config:    config.serving.clone(),
+         metrics:   Arc::clone(&metrics),
++        indexer:   Arc::clone(&indexer),
+         processor: Arc::clone(&processor),
+         ranker:    Arc::clone(&ranker),
+         instant:   Arc::clone(&instant),
+diff --git a/crates/config/src/neural.rs b/crates/config/src/neural.rs
+index dd1ef0a..68b52d1 100644
+--- a/crates/config/src/neural.rs
++++ b/crates/config/src/neural.rs
+@@ -13,7 +13,7 @@ use std::path::PathBuf;
+ /// alongside `model.onnx` (ONNX external data format). ORT loads both
+ /// automatically when they reside in the same directory.
+ ///
+-/// Run `install_models.sh` from the workspace root to populate all three
++/// Run `raithe.sh` from the workspace root to populate all three
+ /// directories before first startup.
+ #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+ pub struct NeuralConfig {
+@@ -30,7 +30,7 @@ pub struct NeuralConfig {
+ 
+     /// `generator/model.onnx` + `model.onnx_data` + `tokenizer.json`
+     /// HuggingFace: Qwen/Qwen2.5-7B-Instruct (text-generation)
+-    /// Hardware-adaptive: `install_models.sh` selects 14B when
++    /// Hardware-adaptive: `raithe.sh` selects 14B when
+     /// RAM ≥ 64 GB and VRAM ≥ 16 GB; 7B on all other hardware.
+     pub generator_dir: PathBuf,
+ 
+@@ -39,18 +39,23 @@ pub struct NeuralConfig {
+     /// macOS). Required when the `ort` crate is built with `load-dynamic`.
+     ///
+     /// If empty, the `ORT_DYLIB_PATH` environment variable is used instead.
+-    /// `run.sh` sets this automatically from the ort build cache.
++    /// `raithe.sh` sets this automatically from the ort build cache.
+     pub ort_dylib_path: PathBuf,
++
++    /// Maximum number of tokens the generator may produce in a single
++    /// `generate()` call. Bounds autoregressive decode cost.
++    pub generator_max_tokens: usize,
+ }
+ 
+ impl Default for NeuralConfig {
+     fn default() -> Self {
+         Self {
+-            model_dir:      PathBuf::from("data/models"),
+-            embedder_dir:   PathBuf::from("data/models/embedder"),
+-            reranker_dir:   PathBuf::from("data/models/reranker"),
+-            generator_dir:  PathBuf::from("data/models/generator"),
+-            ort_dylib_path: PathBuf::new(),
++            model_dir:            PathBuf::from("data/models"),
++            embedder_dir:         PathBuf::from("data/models/embedder"),
++            reranker_dir:         PathBuf::from("data/models/reranker"),
++            generator_dir:        PathBuf::from("data/models/generator"),
++            ort_dylib_path:       PathBuf::new(),
++            generator_max_tokens: 256,
+         }
+     }
+ }
+diff --git a/crates/config/src/serving.rs b/crates/config/src/serving.rs
+index dcb7888..3baa2a9 100644
+--- a/crates/config/src/serving.rs
++++ b/crates/config/src/serving.rs
+@@ -11,6 +11,9 @@ pub struct ServingConfig {
+     /// Maximum accepted request body size in bytes.
+     /// Requests exceeding this limit are rejected with 413.
+     pub max_request_bytes: usize,
++    /// Lifetime of `raithe_sid` session cookies, in seconds.
++    /// Matches `SessionStore` TTL so cookies never outlive server-side state.
++    pub session_ttl_secs: u64,
+     /// CORS allowed origins. Must be explicitly set in production — no
+     /// wildcard is ever permitted. Empty list disables CORS headers entirely.
+     pub allowed_origins: Vec<String>,
+@@ -22,6 +25,7 @@ impl Default for ServingConfig {
+             bind:              String::from("0.0.0.0:8080"),
+             metrics_bind:      String::from("0.0.0.0:9090"),
+             max_request_bytes: 8192,
++            session_ttl_secs:  3_600,
+             allowed_origins:   Vec::new(),
+         }
+     }
+diff --git a/crates/neural/src/lib.rs b/crates/neural/src/lib.rs
+index 113cdd2..ef6aea4 100644
+--- a/crates/neural/src/lib.rs
++++ b/crates/neural/src/lib.rs
+@@ -11,7 +11,8 @@ use std::path::Path;
+ use std::sync::Arc;
+ 
+ use ort::execution_providers::{
+-    CPUExecutionProvider, ExecutionProviderDispatch,
++    CPUExecutionProvider, CUDAExecutionProvider, CoreMLExecutionProvider,
++    DirectMLExecutionProvider, ExecutionProviderDispatch,
+ };
+ use ort::session::Session;
+ use ort::value::Tensor;
+@@ -77,11 +78,12 @@ impl std::fmt::Debug for ModelHandle {
+ /// lifetime of the process. The active `ExecutionProvider` is selected by
+ /// probing in priority order — first successful init wins.
+ pub struct NeuralEngine {
+-    embedder:  ModelHandle,
+-    reranker:  ModelHandle,
+-    generator: ModelHandle,
+-    provider:  ExecutionProvider,
+-    metrics:   Arc<Metrics>,
++    embedder:           ModelHandle,
++    reranker:           ModelHandle,
++    generator:          ModelHandle,
++    provider:           ExecutionProvider,
++    generator_max_new:  usize,
++    metrics:            Arc<Metrics>,
+ }
+ 
+ impl NeuralEngine {
+@@ -116,7 +118,13 @@ impl NeuralEngine {
+             });
+         }
+ 
+-        let provider = ExecutionProvider::Cpu;
++        // §7 probe order — CUDA → DirectML → CoreML → CPU (DEF-002). Each
++        // candidate is exercised against the embedder's model.onnx in a
++        // bounded-duration thread; any failure (EP unsupported, registration
++        // hang past the budget) falls through to the next candidate. CPU is
++        // the unconditional backstop.
++        let embedder_model = config.embedder_dir.join("model.onnx");
++        let provider       = probe_best_provider(&embedder_model);
+ 
+         record_provider_gauge(&metrics, provider);
+ 
+@@ -129,6 +137,7 @@ impl NeuralEngine {
+             reranker,
+             generator,
+             provider,
++            generator_max_new: config.generator_max_tokens,
+             metrics,
+         })
+     }
+@@ -207,23 +216,42 @@ impl NeuralEngine {
+ 
+     /// Generates a rewritten query string using the Qwen2.5 generator.
+     ///
+-    /// Used by `QueryProcessor` for LLM-assisted query understanding.
++    /// Greedy autoregressive decode (DEF-003): feed the prompt, take the
++    /// argmax over the final-step logits, append the token, and repeat until
++    /// EOS or `NeuralConfig::generator_max_tokens` new tokens have been
++    /// produced. No KV cache — the whole sequence is re-fed on every step.
++    /// Correct for any Qwen2.5 ONNX export; a KV-cache optimisation is a
++    /// later, purely internal improvement.
+     pub fn generate(&mut self, prompt: &str) -> Result<String> {
+-        let outputs = run_session(
+-            &mut self.generator.session,
+-            &self.generator.tokeniser,
+-            &[prompt],
+-            "generator",
+-        )?;
+-
+-        let tokens: Vec<u32> = outputs
+-            .into_iter()
+-            .flat_map(|v| v.into_iter().map(|f| f as u32))
+-            .collect();
++        let encoding = self.generator.tokeniser
++            .encode(prompt, true)
++            .map_err(|err| Error::Tokeniser {
++                path:   String::from("generator"),
++                reason: err.to_string(),
++            })?;
++
++        let mut tokens: Vec<u32> = encoding.get_ids().to_vec();
++        let prompt_len = tokens.len();
++        let eos_id     = self.generator.tokeniser
++            .token_to_id("<|endoftext|>")
++            .or_else(|| self.generator.tokeniser.token_to_id("<|im_end|>"));
++
++        let max_new = self.generator_max_new;
++        for _ in 0..max_new {
++            let next = generator_step(
++                &mut self.generator.session,
++                &tokens,
++            )?;
++            tokens.push(next);
++            if Some(next) == eos_id {
++                break;
++            }
++        }
+ 
+-        self.generator
+-            .tokeniser
+-            .decode(&tokens, true)
++        // Decode only the newly generated tail so the prompt is not echoed.
++        let generated: &[u32] = tokens.get(prompt_len..).unwrap_or(&[]);
++        self.generator.tokeniser
++            .decode(generated, true)
+             .map_err(|err| Error::Inference {
+                 model:  String::from("generator"),
+                 reason: err.to_string(),
+@@ -247,11 +275,10 @@ fn record_provider_gauge(metrics: &Metrics, provider: ExecutionProvider) {
+ 
+ /// Loads a model from `dir`, resolving `model.onnx` and `tokenizer.json`.
+ ///
+-/// Uses CPU execution provider only. CUDA EP registration blocks indefinitely
+-/// on Linux systems with NVIDIA drivers but without CUDA toolkit ≥ 12.8.
+-/// Both `model.onnx` and `tokenizer.json` must be present.
++/// The selected `provider` must already have survived `probe_best_provider`.
++/// Both `model.onnx` and `tokenizer.json` must be present in `dir`.
+ /// Missing either returns `Error::ModelNotFound`.
+-fn load_model(dir: &Path, _provider: ExecutionProvider) -> Result<ModelHandle> {
++fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
+     let model_path     = dir.join("model.onnx");
+     let tokeniser_path = dir.join("tokenizer.json");
+ 
+@@ -261,15 +288,7 @@ fn load_model(dir: &Path, _provider: ExecutionProvider) -> Result<ModelHandle> {
+         });
+     }
+ 
+-    // CPU-only execution provider list.
+-    // ORT 2.0.0-rc.12 CUDA EP requires CUDA toolkit ≥ 12.8 + cuDNN ≥ 9.19.
+-    // Attempting to register CUDA EP without the correct toolkit version
+-    // blocks indefinitely in futex_wait_queue on Linux via libcuda.so
+-    // constructor probing /dev/nvidiactl. CPU is always safe and available.
+-    // CUDA can be re-enabled here once the correct toolkit is confirmed.
+-    let eps: Vec<ExecutionProviderDispatch> = vec![
+-        CPUExecutionProvider::default().into(),
+-    ];
++    let eps: Vec<ExecutionProviderDispatch> = execution_providers_for(provider);
+ 
+     let session = Session::builder()
+         .map_err(|err| Error::OrtLoad {
+@@ -296,6 +315,84 @@ fn load_model(dir: &Path, _provider: ExecutionProvider) -> Result<ModelHandle> {
+     Ok(ModelHandle { session, tokeniser })
+ }
+ 
++/// Returns the list of execution provider dispatches for the selected
++/// provider, always terminated with CPU as the unconditional backstop.
++fn execution_providers_for(provider: ExecutionProvider) -> Vec<ExecutionProviderDispatch> {
++    match provider {
++        ExecutionProvider::Cuda     => vec![
++            CUDAExecutionProvider::default().build(),
++            CPUExecutionProvider::default().build(),
++        ],
++        ExecutionProvider::DirectMl => vec![
++            DirectMLExecutionProvider::default().build(),
++            CPUExecutionProvider::default().build(),
++        ],
++        ExecutionProvider::CoreMl   => vec![
++            CoreMLExecutionProvider::default().build(),
++            CPUExecutionProvider::default().build(),
++        ],
++        ExecutionProvider::Cpu      => vec![
++            CPUExecutionProvider::default().build(),
++        ],
++    }
++}
++
++/// Execution-provider probe (§7 / v1.8 §5.11 / DEF-002).
++///
++/// Each candidate is tried in priority order against `model_path` inside a
++/// bounded-duration thread. The first candidate that commits a session
++/// within the budget wins; everything else falls through to CPU.
++///
++/// The per-candidate budget is intentionally small — spec §5.11 says
++/// unavailable providers fail in microseconds. A budget of a few seconds
++/// gives real failure paths time to unwind without letting pathological
++/// registration blocks (e.g. libcuda.so with a missing toolkit) hang the
++/// whole process.
++fn probe_best_provider(model_path: &Path) -> ExecutionProvider {
++    const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
++
++    for candidate in [
++        ExecutionProvider::Cuda,
++        ExecutionProvider::DirectMl,
++        ExecutionProvider::CoreMl,
++    ] {
++        if probe_provider(candidate, model_path, PROBE_BUDGET) {
++            return candidate;
++        }
++    }
++
++    ExecutionProvider::Cpu
++}
++
++/// Exercises `candidate` against `model_path` with a hard timeout.
++///
++/// Returns `true` if a session builds with the candidate as the primary EP
++/// within `budget`; `false` otherwise. Any panic, error, or timeout is
++/// treated as "unavailable."
++fn probe_provider(
++    candidate:  ExecutionProvider,
++    model_path: &Path,
++    budget:     std::time::Duration,
++) -> bool {
++    if !model_path.exists() {
++        return false;
++    }
++
++    let path = model_path.to_path_buf();
++    let (tx, rx) = std::sync::mpsc::channel::<bool>();
++
++    std::thread::spawn(move || {
++        let eps = execution_providers_for(candidate);
++        let ok  = Session::builder()
++            .and_then(|b| b.with_execution_providers(eps))
++            .and_then(|b| b.commit_from_file(&path))
++            .is_ok();
++        let _ = tx.send(ok);
++    });
++
++    rx.recv_timeout(budget).unwrap_or(false)
++}
++
+ /// Tokenises `texts`, runs ONNX inference, and returns raw f32 output vectors.
+ fn run_session(
+     session: &mut Session,
+@@ -382,6 +479,109 @@ fn run_session(
+     Ok(result)
+ }
+ 
++/// Runs one autoregressive decode step on the Qwen2.5 generator.
++///
++/// Feeds the full current token sequence, extracts the logits tensor
++/// (shape `[1, seq, vocab]`), argmaxes over the final position's logits,
++/// and returns the next token id. Called once per new token by
++/// `NeuralEngine::generate` (DEF-003). No KV cache — full sequence is
++/// re-fed on every step; correct for any Qwen2.5 export.
++fn generator_step(session: &mut Session, tokens: &[u32]) -> Result<u32> {
++    let seq = tokens.len();
++    if seq == 0 {
++        return Err(Error::Inference {
++            model:  String::from("generator"),
++            reason: String::from("cannot step on an empty token sequence"),
++        });
++    }
++
++    let ids:   Vec<i64> = tokens.iter().map(|&t| t as i64).collect();
++    let masks: Vec<i64> = vec![1i64; seq];
++
++    let ids_tensor = Tensor::<i64>::from_array(([1usize, seq], ids))
++        .map_err(|err| Error::Inference {
++            model:  String::from("generator"),
++            reason: err.to_string(),
++        })?;
++
++    let mask_tensor = Tensor::<i64>::from_array(([1usize, seq], masks))
++        .map_err(|err| Error::Inference {
++            model:  String::from("generator"),
++            reason: err.to_string(),
++        })?;
++
++    let outputs = session
++        .run(ort::inputs![
++            "input_ids"      => ids_tensor,
++            "attention_mask" => mask_tensor
++        ])
++        .map_err(|err| Error::Inference {
++            model:  String::from("generator"),
++            reason: err.to_string(),
++        })?;
++
++    let logits_value = outputs
++        .values()
++        .next()
++        .ok_or_else(|| Error::Inference {
++            model:  String::from("generator"),
++            reason: String::from("no output tensors returned"),
++        })?;
++
++    let (shape, slice) = logits_value
++        .try_extract_tensor::<f32>()
++        .map_err(|err| Error::Inference {
++            model:  String::from("generator"),
++            reason: err.to_string(),
++        })?;
++
++    // Qwen2.5 causal-LM head emits logits of shape [batch=1, seq, vocab].
++    // Argmax the final-step slice: logits[0, seq-1, :].
++    if shape.len() != 3 {
++        return Err(Error::Inference {
++            model:  String::from("generator"),
++            reason: format!("expected 3-D logits, got shape {shape:?}"),
++        });
++    }
++    let step_seq = shape[1] as usize;
++    let vocab    = shape[2] as usize;
++    if step_seq == 0 || vocab == 0 {
++        return Err(Error::Inference {
++            model:  String::from("generator"),
++            reason: format!("degenerate logits shape {shape:?}"),
++        });
++    }
++
++    let last_start = (step_seq - 1) * vocab;
++    let last_end   = last_start + vocab;
++    let last_logits = slice.get(last_start..last_end).ok_or_else(|| Error::Inference {
++        model:  String::from("generator"),
++        reason: String::from("logits slice shorter than shape implies"),
++    })?;
++
++    let next = argmax_u32(last_logits).ok_or_else(|| Error::Inference {
++        model:  String::from("generator"),
++        reason: String::from("empty final-step logits"),
++    })?;
++
++    Ok(next)
++}
++
++/// Returns the index of the maximum value in `values`, or `None` when empty.
++fn argmax_u32(values: &[f32]) -> Option<u32> {
++    let mut best_idx: usize = 0;
++    let mut best_val: f32   = f32::NEG_INFINITY;
++    let mut seen            = false;
++    for (i, &v) in values.iter().enumerate() {
++        if !seen || v > best_val {
++            best_idx = i;
++            best_val = v;
++            seen     = true;
++        }
++    }
++    seen.then_some(best_idx as u32)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -415,4 +615,27 @@ mod tests {
+         assert!(result.is_err());
+         assert!(matches!(result.unwrap_err(), Error::ModelNotFound { .. }));
+     }
++
++    #[test]
++    fn argmax_u32_returns_index_of_max() {
++        assert_eq!(argmax_u32(&[0.1, 0.9, 0.3]), Some(1));
++        assert_eq!(argmax_u32(&[-5.0, -1.0, -3.0]), Some(1));
++    }
++
++    #[test]
++    fn argmax_u32_handles_first_position() {
++        assert_eq!(argmax_u32(&[5.0, 1.0, 2.0]), Some(0));
++    }
++
++    #[test]
++    fn argmax_u32_handles_negatives() {
++        // Every value is negative; must still return a valid index, not skip
++        // to None because the default f32::NEG_INFINITY would otherwise match.
++        assert_eq!(argmax_u32(&[-10.0, -20.0, -5.0]), Some(2));
++    }
++
++    #[test]
++    fn argmax_u32_none_when_empty() {
++        assert_eq!(argmax_u32(&[]), None);
++    }
+ }
+diff --git a/crates/serving/Cargo.toml b/crates/serving/Cargo.toml
+index ddb4d72..253c88d 100644
+--- a/crates/serving/Cargo.toml
++++ b/crates/serving/Cargo.toml
+@@ -11,6 +11,7 @@ repository.workspace = true
+ [dependencies]
+ raithe-common    = { path = "../common" }
+ raithe-config    = { path = "../config" }
++raithe-indexer   = { path = "../indexer" }
+ raithe-metrics   = { path = "../metrics" }
+ raithe-query     = { path = "../query" }
+ raithe-ranker    = { path = "../ranker" }
+diff --git a/crates/serving/src/lib.rs b/crates/serving/src/lib.rs
+index c3b9973..ab1eec4 100644
+--- a/crates/serving/src/lib.rs
++++ b/crates/serving/src/lib.rs
+@@ -30,6 +30,7 @@ use tower_http::{
+ 
+ use raithe_common::RawHit;
+ use raithe_config::ServingConfig;
++use raithe_indexer::Indexer;
+ use raithe_instant::{InstantAnswer, InstantEngine};
+ use raithe_metrics::Metrics;
+ use raithe_query::QueryProcessor;
+@@ -62,6 +63,7 @@ pub type Result<T> = std::result::Result<T, Error>;
+ pub struct AppState {
+     pub config:    ServingConfig,
+     pub metrics:   Arc<Metrics>,
++    pub indexer:   Arc<Indexer>,
+     pub processor: Arc<QueryProcessor>,
+     pub ranker:    Arc<Ranker>,
+     pub instant:   Arc<InstantEngine>,
+@@ -190,8 +192,9 @@ async fn handle_index() -> impl IntoResponse {
+ 
+ async fn handle_search(
+     State(state): State<Arc<AppState>>,
++    headers: axum::http::HeaderMap,
+     Query(params): Query<SearchParams>,
+-) -> impl IntoResponse {
++) -> Response {
+     let raw = match params.q.as_deref().filter(|s| !s.is_empty()) {
+         Some(q) => q.to_owned(),
+         None    => {
+@@ -199,15 +202,21 @@ async fn handle_search(
+         }
+     };
+ 
+-    // Session tracking.
+-    let session_id = SessionId::new();
++    // Session identity (DEF-005). The client's existing identifier is read
++    // from `X-Raithe-Session` (API clients) or the `raithe_sid` cookie
++    // (browsers). When absent or malformed, a new id is minted and returned
++    // via `Set-Cookie` so the next request can re-use it.
++    let (session_id, mint_cookie) = resolve_session_id(&headers);
+ 
+-    let _ = state.sessions.record_query(&session_id, &raw);
++    if let Err(err) = state.sessions.record_query(&session_id, &raw) {
++        tracing::warn!(%err, "session record_query failed");
++    }
+ 
+     // Query processing.
+     let parsed = match state.processor.process(&raw) {
+         Ok(p)  => p,
+-        Err(_) => {
++        Err(err) => {
++            tracing::warn!(%err, "query processor failed");
+             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+         }
+     };
+@@ -215,12 +224,23 @@ async fn handle_search(
+     // Instant answer (non-fatal if absent).
+     let instant = state.instant.resolve(&parsed);
+ 
+-    // Ranking (stub path — indexer wired at app layer).
+-    let hits: Vec<RawHit> = Vec::new();
++    // Phase 1 — Tantivy BM25F search via the indexer (DEF-004).
++    let hits = match state.indexer.search(&parsed) {
++        Ok(h)  => h,
++        Err(err) => {
++            tracing::warn!(%err, "indexer search failed");
++            Vec::<RawHit>::new()
++        }
++    };
++
++    // Phase 2 + 3 — three-phase ranking pipeline.
+     let pageranks = raithe_linkgraph::PageRankScores::new();
+     let ranked = match state.ranker.rank(hits, &parsed, &pageranks) {
+         Ok(r)  => r,
+-        Err(_) => Vec::new(),
++        Err(err) => {
++            tracing::warn!(%err, "ranker failed");
++            Vec::new()
++        }
+     };
+ 
+     let results: Vec<SearchResult> = ranked
+@@ -233,11 +253,49 @@ async fn handle_search(
+         })
+         .collect();
+ 
+-    let instant_resp  = instant.map(InstantAnswerResponse::from);
++    let instant_resp = instant.map(InstantAnswerResponse::from);
++    let html         = templates::render_results(&raw, &results, instant_resp.as_ref());
++    let mut response = Html(html).into_response();
++
++    if mint_cookie {
++        let cookie = format!(
++            "raithe_sid={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
++            state.config.session_ttl_secs,
++        );
++        if let Ok(value) = HeaderValue::from_str(&cookie) {
++            response.headers_mut().insert(header::SET_COOKIE, value);
++        }
++    }
+ 
+-    // Render HTML for browser or JSON for API client.
+-    let html = templates::render_results(&raw, &results, instant_resp.as_ref());
+-    Html(html).into_response()
++    response
++}
++
++/// Returns the session id for the current request along with a flag
++/// indicating whether the caller should emit a `Set-Cookie` for it.
++///
++/// Resolution order:
++///   1. `X-Raithe-Session` header — API clients and tests.
++///   2. `Cookie: raithe_sid=<uuid>` — browser sessions.
++///   3. Freshly minted `SessionId` — caller must set cookie on response.
++fn resolve_session_id(headers: &axum::http::HeaderMap) -> (SessionId, bool) {
++    if let Some(raw) = headers.get("x-raithe-session").and_then(|v| v.to_str().ok()) {
++        if let Ok(sid) = SessionId::parse_str(raw.trim()) {
++            return (sid, false);
++        }
++    }
++
++    if let Some(raw) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
++        for part in raw.split(';') {
++            let part = part.trim();
++            if let Some(value) = part.strip_prefix("raithe_sid=") {
++                if let Ok(sid) = SessionId::parse_str(value.trim()) {
++                    return (sid, false);
++                }
++            }
++        }
++    }
++
++    (SessionId::new(), true)
+ }
+ 
+ // ── Security header middleware ────────────────────────────────────────────────
+@@ -316,4 +374,64 @@ mod tests {
+         assert_eq!(resp.display, "42");
+         assert!(resp.kind.contains("Calculation"));
+     }
++
++    #[test]
++    fn session_from_x_raithe_session_header() {
++        let existing = SessionId::new();
++        let mut headers = axum::http::HeaderMap::new();
++        headers.insert(
++            "x-raithe-session",
++            HeaderValue::from_str(&existing.to_string()).unwrap(),
++        );
++        let (sid, mint) = resolve_session_id(&headers);
++        assert_eq!(sid, existing);
++        assert!(!mint, "existing header must not trigger Set-Cookie");
++    }
++
++    #[test]
++    fn session_from_cookie() {
++        let existing = SessionId::new();
++        let cookie = format!("raithe_sid={existing}; other=value");
++        let mut headers = axum::http::HeaderMap::new();
++        headers.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
++        let (sid, mint) = resolve_session_id(&headers);
++        assert_eq!(sid, existing);
++        assert!(!mint);
++    }
++
++    #[test]
++    fn session_minted_when_headers_absent() {
++        let headers = axum::http::HeaderMap::new();
++        let (_sid, mint) = resolve_session_id(&headers);
++        assert!(mint, "absent identifier must trigger Set-Cookie");
++    }
++
++    #[test]
++    fn session_minted_when_cookie_malformed() {
++        let mut headers = axum::http::HeaderMap::new();
++        headers.insert(
++            header::COOKIE,
++            HeaderValue::from_static("raithe_sid=not-a-uuid"),
++        );
++        let (_sid, mint) = resolve_session_id(&headers);
++        assert!(mint, "malformed cookie must be rejected and re-minted");
++    }
++
++    #[test]
++    fn header_takes_precedence_over_cookie() {
++        let header_sid = SessionId::new();
++        let cookie_sid = SessionId::new();
++        let mut headers = axum::http::HeaderMap::new();
++        headers.insert(
++            "x-raithe-session",
++            HeaderValue::from_str(&header_sid.to_string()).unwrap(),
++        );
++        headers.insert(
++            header::COOKIE,
++            HeaderValue::from_str(&format!("raithe_sid={cookie_sid}")).unwrap(),
++        );
++        let (sid, mint) = resolve_session_id(&headers);
++        assert_eq!(sid, header_sid);
++        assert!(!mint);
++    }
+ }
+diff --git a/crates/session/src/lib.rs b/crates/session/src/lib.rs
+index 0af4f85..f131682 100644
+--- a/crates/session/src/lib.rs
++++ b/crates/session/src/lib.rs
+@@ -15,6 +15,8 @@ use uuid::Uuid;
+ pub enum Error {
+     #[error("session {id} not found")]
+     NotFound { id: SessionId },
++    #[error("invalid session id: {reason}")]
++    InvalidId { reason: String },
+ }
+ 
+ pub type Result<T> = std::result::Result<T, Error>;
+@@ -28,6 +30,18 @@ impl SessionId {
+     pub fn new() -> Self {
+         Self(Uuid::new_v4())
+     }
++
++    /// Parses a UUID string into a `SessionId`.
++    ///
++    /// Accepts the standard 36-character hyphenated form (e.g. emitted by
++    /// `Display`). Returns `Error::InvalidId` for any other input.
++    pub fn parse_str(raw: &str) -> Result<Self> {
++        Uuid::parse_str(raw)
++            .map(Self)
++            .map_err(|source| Error::InvalidId {
++                reason: source.to_string(),
++            })
++    }
+ }
+ 
+ impl Default for SessionId {
+@@ -225,4 +239,21 @@ mod tests {
+         let id = SessionId::new();
+         assert_eq!(id.to_string().len(), 36);
+     }
++
++    #[test]
++    fn session_id_round_trip_through_parse_str() {
++        let id     = SessionId::new();
++        let parsed = SessionId::parse_str(&id.to_string()).unwrap();
++        assert_eq!(id, parsed);
++    }
++
++    #[test]
++    fn session_id_parse_rejects_malformed() {
++        assert!(SessionId::parse_str("not-a-uuid").is_err());
++        assert!(SessionId::parse_str("").is_err());
++        assert!(matches!(
++            SessionId::parse_str("zzz"),
++            Err(Error::InvalidId { .. })
++        ));
++    }
+ }
+diff --git a/data/config/engine.toml b/data/config/engine.toml
+index 28396e3..127b643 100644
+--- a/data/config/engine.toml
++++ b/data/config/engine.toml
+@@ -35,10 +35,13 @@ model_dir      = "data/models"
+ embedder_dir   = "data/models/embedder"
+ reranker_dir   = "data/models/reranker"
+ generator_dir  = "data/models/generator"
++# Maximum new tokens produced per generate() call (autoregressive decode).
++generator_max_tokens = 256
+ 
+ [serving]
+ bind               = "0.0.0.0:8080"
+ metrics_bind       = "0.0.0.0:9090"
+ max_request_bytes  = 8192
++session_ttl_secs   = 3600
+ # Add your allowed origins here — never leave empty in production
+ allowed_origins    = []

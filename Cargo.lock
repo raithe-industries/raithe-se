@@ -3087,6 +3087,7 @@ dependencies = [
  "axum",
  "raithe-common",
  "raithe-config",
+ "raithe-indexer",
  "raithe-instant",
  "raithe-linkgraph",
  "raithe-metrics",

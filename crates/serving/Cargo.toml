@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 raithe-common    = { path = "../common" }
 raithe-config    = { path = "../config" }
+raithe-indexer   = { path = "../indexer" }
 raithe-metrics   = { path = "../metrics" }
 raithe-query     = { path = "../query" }
 raithe-ranker    = { path = "../ranker" }

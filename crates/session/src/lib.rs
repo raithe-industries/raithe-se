@@ -15,6 +15,8 @@ use uuid::Uuid;
 pub enum Error {
     #[error("session {id} not found")]
     NotFound { id: SessionId },
+    #[error("invalid session id: {reason}")]
+    InvalidId { reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -27,6 +29,18 @@ impl SessionId {
     /// Generates a new random session identifier.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Parses a UUID string into a `SessionId`.
+    ///
+    /// Accepts the standard 36-character hyphenated form (e.g. emitted by
+    /// `Display`). Returns `Error::InvalidId` for any other input.
+    pub fn parse_str(raw: &str) -> Result<Self> {
+        Uuid::parse_str(raw)
+            .map(Self)
+            .map_err(|source| Error::InvalidId {
+                reason: source.to_string(),
+            })
     }
 }
 
@@ -224,5 +238,22 @@ mod tests {
     fn session_id_display_is_uuid_format() {
         let id = SessionId::new();
         assert_eq!(id.to_string().len(), 36);
+    }
+
+    #[test]
+    fn session_id_round_trip_through_parse_str() {
+        let id     = SessionId::new();
+        let parsed = SessionId::parse_str(&id.to_string()).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn session_id_parse_rejects_malformed() {
+        assert!(SessionId::parse_str("not-a-uuid").is_err());
+        assert!(SessionId::parse_str("").is_err());
+        assert!(matches!(
+            SessionId::parse_str("zzz"),
+            Err(Error::InvalidId { .. })
+        ));
     }
 }

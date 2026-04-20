@@ -231,17 +231,42 @@ async fn main() -> Result<()> {
             let mut neural     = neural_for_index;
             let parser         = Parser::new();
 
+            // URL → DocumentId resolver for link-graph edge construction.
+            // Outlinks whose destinations are not yet indexed are parked in
+            // `pending_outlinks` keyed by the unresolved URL. When that URL
+            // is later crawled and indexed, the parked sources are drained
+            // and wired via `LinkGraph::add_edge` (DEF-006).
+            let mut url_to_id: std::collections::HashMap<raithe_common::Url, raithe_common::DocumentId>
+                = std::collections::HashMap::new();
+            let mut pending_outlinks: std::collections::HashMap<raithe_common::Url, Vec<raithe_common::DocumentId>>
+                = std::collections::HashMap::new();
+            // Monotonic document-id counter. `DocumentId::ZERO` is the sentinel
+            // for "unassigned" — the first real id is ONE. Overflow returns
+            // `Error::DocIdExhausted` via `DocumentId::next` (§9.1).
+            let mut next_doc_id: raithe_common::DocumentId = raithe_common::DocumentId::ZERO;
+
             tokio::spawn(async move {
                 while let Some((fetch_result, depth)) = fetch_rx.recv().await {
                     let url = fetch_result.url.clone();
 
-                    let doc = match parser.parse(fetch_result) {
+                    let mut doc = match parser.parse(fetch_result) {
                         Ok(d)  => d,
                         Err(e) => {
                             tracing::warn!(%url, error = %e, "parse failed — skipping");
                             continue;
                         }
                     };
+
+                    match next_doc_id.next() {
+                        Some(id) => {
+                            next_doc_id = id;
+                            doc.id      = id;
+                        }
+                        None => {
+                            tracing::error!("document id space exhausted — halting indexing");
+                            break;
+                        }
+                    }
 
                     if let Err(e) = indexer.add(&doc) {
                         tracing::warn!(%url, error = %e, "indexer add failed");
@@ -261,15 +286,34 @@ async fn main() -> Result<()> {
                         Err(e) => tracing::warn!(%url, error = %e, "embed failed"),
                     }
 
+                    // LinkGraph wiring (DEF-006). Three passes per document:
+                    //   1. Register this doc's URL → id so later docs that
+                    //      link to it can be resolved immediately.
+                    //   2. Drain any previously-parked sources that had this
+                    //      URL as their outlink — add the now-resolvable edges.
+                    //   3. For each outlink of the current doc: add an edge if
+                    //      the destination is known, else park it.
                     {
+                        url_to_id.insert(doc.url.clone(), doc.id);
+
                         let mut graph = link_graph.lock()
                             .unwrap_or_else(|p| p.into_inner());
-                        // Record outbound edges from this document.
-                        // dst IDs are only available once the destination is
-                        // indexed. Edges where dst is not yet indexed are
-                        // omitted here and recorded when the destination
-                        // document is later crawled and indexed.
-                        let _ = (doc.id, &doc.outlinks, &mut graph);
+
+                        if let Some(sources) = pending_outlinks.remove(&doc.url) {
+                            for src_id in sources {
+                                graph.add_edge(src_id, doc.id);
+                            }
+                        }
+
+                        for outlink in &doc.outlinks {
+                            match url_to_id.get(outlink).copied() {
+                                Some(dst_id) => graph.add_edge(doc.id, dst_id),
+                                None         => pending_outlinks
+                                    .entry(outlink.clone())
+                                    .or_default()
+                                    .push(doc.id),
+                            }
+                        }
                     }
 
                     if depth < max_depth {
@@ -308,6 +352,7 @@ async fn main() -> Result<()> {
     let app_state = Arc::new(AppState {
         config:    config.serving.clone(),
         metrics:   Arc::clone(&metrics),
+        indexer:   Arc::clone(&indexer),
         processor: Arc::clone(&processor),
         ranker:    Arc::clone(&ranker),
         instant:   Arc::clone(&instant),

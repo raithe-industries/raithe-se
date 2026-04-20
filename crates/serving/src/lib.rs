@@ -30,6 +30,7 @@ use tower_http::{
 
 use raithe_common::RawHit;
 use raithe_config::ServingConfig;
+use raithe_indexer::Indexer;
 use raithe_instant::{InstantAnswer, InstantEngine};
 use raithe_metrics::Metrics;
 use raithe_query::QueryProcessor;
@@ -62,6 +63,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct AppState {
     pub config:    ServingConfig,
     pub metrics:   Arc<Metrics>,
+    pub indexer:   Arc<Indexer>,
     pub processor: Arc<QueryProcessor>,
     pub ranker:    Arc<Ranker>,
     pub instant:   Arc<InstantEngine>,
@@ -190,8 +192,9 @@ async fn handle_index() -> impl IntoResponse {
 
 async fn handle_search(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<SearchParams>,
-) -> impl IntoResponse {
+) -> Response {
     let raw = match params.q.as_deref().filter(|s| !s.is_empty()) {
         Some(q) => q.to_owned(),
         None    => {
@@ -199,15 +202,21 @@ async fn handle_search(
         }
     };
 
-    // Session tracking.
-    let session_id = SessionId::new();
+    // Session identity (DEF-005). The client's existing identifier is read
+    // from `X-Raithe-Session` (API clients) or the `raithe_sid` cookie
+    // (browsers). When absent or malformed, a new id is minted and returned
+    // via `Set-Cookie` so the next request can re-use it.
+    let (session_id, mint_cookie) = resolve_session_id(&headers);
 
-    let _ = state.sessions.record_query(&session_id, &raw);
+    if let Err(err) = state.sessions.record_query(&session_id, &raw) {
+        tracing::warn!(%err, "session record_query failed");
+    }
 
     // Query processing.
     let parsed = match state.processor.process(&raw) {
         Ok(p)  => p,
-        Err(_) => {
+        Err(err) => {
+            tracing::warn!(%err, "query processor failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
@@ -215,12 +224,23 @@ async fn handle_search(
     // Instant answer (non-fatal if absent).
     let instant = state.instant.resolve(&parsed);
 
-    // Ranking (stub path — indexer wired at app layer).
-    let hits: Vec<RawHit> = Vec::new();
+    // Phase 1 — Tantivy BM25F search via the indexer (DEF-004).
+    let hits = match state.indexer.search(&parsed) {
+        Ok(h)  => h,
+        Err(err) => {
+            tracing::warn!(%err, "indexer search failed");
+            Vec::<RawHit>::new()
+        }
+    };
+
+    // Phase 2 + 3 — three-phase ranking pipeline.
     let pageranks = raithe_linkgraph::PageRankScores::new();
     let ranked = match state.ranker.rank(hits, &parsed, &pageranks) {
         Ok(r)  => r,
-        Err(_) => Vec::new(),
+        Err(err) => {
+            tracing::warn!(%err, "ranker failed");
+            Vec::new()
+        }
     };
 
     let results: Vec<SearchResult> = ranked
@@ -233,11 +253,49 @@ async fn handle_search(
         })
         .collect();
 
-    let instant_resp  = instant.map(InstantAnswerResponse::from);
+    let instant_resp = instant.map(InstantAnswerResponse::from);
+    let html         = templates::render_results(&raw, &results, instant_resp.as_ref());
+    let mut response = Html(html).into_response();
 
-    // Render HTML for browser or JSON for API client.
-    let html = templates::render_results(&raw, &results, instant_resp.as_ref());
-    Html(html).into_response()
+    if mint_cookie {
+        let cookie = format!(
+            "raithe_sid={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+            state.config.session_ttl_secs,
+        );
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response.headers_mut().insert(header::SET_COOKIE, value);
+        }
+    }
+
+    response
+}
+
+/// Returns the session id for the current request along with a flag
+/// indicating whether the caller should emit a `Set-Cookie` for it.
+///
+/// Resolution order:
+///   1. `X-Raithe-Session` header — API clients and tests.
+///   2. `Cookie: raithe_sid=<uuid>` — browser sessions.
+///   3. Freshly minted `SessionId` — caller must set cookie on response.
+fn resolve_session_id(headers: &axum::http::HeaderMap) -> (SessionId, bool) {
+    if let Some(raw) = headers.get("x-raithe-session").and_then(|v| v.to_str().ok()) {
+        if let Ok(sid) = SessionId::parse_str(raw.trim()) {
+            return (sid, false);
+        }
+    }
+
+    if let Some(raw) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+        for part in raw.split(';') {
+            let part = part.trim();
+            if let Some(value) = part.strip_prefix("raithe_sid=") {
+                if let Ok(sid) = SessionId::parse_str(value.trim()) {
+                    return (sid, false);
+                }
+            }
+        }
+    }
+
+    (SessionId::new(), true)
 }
 
 // ── Security header middleware ────────────────────────────────────────────────
@@ -315,5 +373,65 @@ mod tests {
         let resp = InstantAnswerResponse::from(ia);
         assert_eq!(resp.display, "42");
         assert!(resp.kind.contains("Calculation"));
+    }
+
+    #[test]
+    fn session_from_x_raithe_session_header() {
+        let existing = SessionId::new();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-raithe-session",
+            HeaderValue::from_str(&existing.to_string()).unwrap(),
+        );
+        let (sid, mint) = resolve_session_id(&headers);
+        assert_eq!(sid, existing);
+        assert!(!mint, "existing header must not trigger Set-Cookie");
+    }
+
+    #[test]
+    fn session_from_cookie() {
+        let existing = SessionId::new();
+        let cookie = format!("raithe_sid={existing}; other=value");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+        let (sid, mint) = resolve_session_id(&headers);
+        assert_eq!(sid, existing);
+        assert!(!mint);
+    }
+
+    #[test]
+    fn session_minted_when_headers_absent() {
+        let headers = axum::http::HeaderMap::new();
+        let (_sid, mint) = resolve_session_id(&headers);
+        assert!(mint, "absent identifier must trigger Set-Cookie");
+    }
+
+    #[test]
+    fn session_minted_when_cookie_malformed() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("raithe_sid=not-a-uuid"),
+        );
+        let (_sid, mint) = resolve_session_id(&headers);
+        assert!(mint, "malformed cookie must be rejected and re-minted");
+    }
+
+    #[test]
+    fn header_takes_precedence_over_cookie() {
+        let header_sid = SessionId::new();
+        let cookie_sid = SessionId::new();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-raithe-session",
+            HeaderValue::from_str(&header_sid.to_string()).unwrap(),
+        );
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("raithe_sid={cookie_sid}")).unwrap(),
+        );
+        let (sid, mint) = resolve_session_id(&headers);
+        assert_eq!(sid, header_sid);
+        assert!(!mint);
     }
 }

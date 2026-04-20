@@ -11,6 +11,9 @@ pub struct ServingConfig {
     /// Maximum accepted request body size in bytes.
     /// Requests exceeding this limit are rejected with 413.
     pub max_request_bytes: usize,
+    /// Lifetime of `raithe_sid` session cookies, in seconds.
+    /// Matches `SessionStore` TTL so cookies never outlive server-side state.
+    pub session_ttl_secs: u64,
     /// CORS allowed origins. Must be explicitly set in production — no
     /// wildcard is ever permitted. Empty list disables CORS headers entirely.
     pub allowed_origins: Vec<String>,
@@ -22,6 +25,7 @@ impl Default for ServingConfig {
             bind:              String::from("0.0.0.0:8080"),
             metrics_bind:      String::from("0.0.0.0:9090"),
             max_request_bytes: 8192,
+            session_ttl_secs:  3_600,
             allowed_origins:   Vec::new(),
         }
     }

@@ -35,10 +35,13 @@ model_dir      = "data/models"
 embedder_dir   = "data/models/embedder"
 reranker_dir   = "data/models/reranker"
 generator_dir  = "data/models/generator"
+# Maximum new tokens produced per generate() call (autoregressive decode).
+generator_max_tokens = 256
 
 [serving]
 bind               = "0.0.0.0:8080"
 metrics_bind       = "0.0.0.0:9090"
 max_request_bytes  = 8192
+session_ttl_secs   = 3600
 # Add your allowed origins here — never leave empty in production
 allowed_origins    = []

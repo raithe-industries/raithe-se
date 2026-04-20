@@ -13,7 +13,7 @@ use std::path::PathBuf;
 /// alongside `model.onnx` (ONNX external data format). ORT loads both
 /// automatically when they reside in the same directory.
 ///
-/// Run `install_models.sh` from the workspace root to populate all three
+/// Run `raithe.sh` from the workspace root to populate all three
 /// directories before first startup.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct NeuralConfig {
@@ -30,7 +30,7 @@ pub struct NeuralConfig {
 
     /// `generator/model.onnx` + `model.onnx_data` + `tokenizer.json`
     /// HuggingFace: Qwen/Qwen2.5-7B-Instruct (text-generation)
-    /// Hardware-adaptive: `install_models.sh` selects 14B when
+    /// Hardware-adaptive: `raithe.sh` selects 14B when
     /// RAM ≥ 64 GB and VRAM ≥ 16 GB; 7B on all other hardware.
     pub generator_dir: PathBuf,
 
@@ -39,18 +39,23 @@ pub struct NeuralConfig {
     /// macOS). Required when the `ort` crate is built with `load-dynamic`.
     ///
     /// If empty, the `ORT_DYLIB_PATH` environment variable is used instead.
-    /// `run.sh` sets this automatically from the ort build cache.
+    /// `raithe.sh` sets this automatically from the ort build cache.
     pub ort_dylib_path: PathBuf,
+
+    /// Maximum number of tokens the generator may produce in a single
+    /// `generate()` call. Bounds autoregressive decode cost.
+    pub generator_max_tokens: usize,
 }
 
 impl Default for NeuralConfig {
     fn default() -> Self {
         Self {
-            model_dir:      PathBuf::from("data/models"),
-            embedder_dir:   PathBuf::from("data/models/embedder"),
-            reranker_dir:   PathBuf::from("data/models/reranker"),
-            generator_dir:  PathBuf::from("data/models/generator"),
-            ort_dylib_path: PathBuf::new(),
+            model_dir:            PathBuf::from("data/models"),
+            embedder_dir:         PathBuf::from("data/models/embedder"),
+            reranker_dir:         PathBuf::from("data/models/reranker"),
+            generator_dir:        PathBuf::from("data/models/generator"),
+            ort_dylib_path:       PathBuf::new(),
+            generator_max_tokens: 256,
         }
     }
 }

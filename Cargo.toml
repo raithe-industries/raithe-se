@@ -103,10 +103,9 @@ anyhow           = "1.0"     # permitted in crates/app ONLY
 gbdt             = "0.1.2"
 
 # ── ONNX Runtime (neural — hardware-agnostic, load-dynamic) ──────────────────
+# ORT_DYLIB_PATH is exported by raithe.sh at launch. See .cargo/config.toml
+# for environment configuration. Env-var keys must NOT appear here (DEF-001).
 ort              = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
-ORT_LIB_LOCATION    = "/home/stone/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6e7848acdb7284feb44e2781583a90e820839767459ad8fa2abf7dd63b731fd9"
-ORT_PREFER_DYNAMIC_LINK = "1"
-LD_LIBRARY_PATH     = "/home/stone/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6e7848acdb7284feb44e2781583a90e820839767459ad8fa2abf7dd63b731fd9"
 
 # ── Instant answers ───────────────────────────────────────────────────────────
 evalexpr         = "11.0"

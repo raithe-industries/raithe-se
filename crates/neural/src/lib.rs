@@ -11,7 +11,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ort::execution_providers::{
-    CPUExecutionProvider, ExecutionProviderDispatch,
+    CPUExecutionProvider, CUDAExecutionProvider, CoreMLExecutionProvider,
+    DirectMLExecutionProvider, ExecutionProviderDispatch,
 };
 use ort::session::Session;
 use ort::value::Tensor;
@@ -77,11 +78,12 @@ impl std::fmt::Debug for ModelHandle {
 /// lifetime of the process. The active `ExecutionProvider` is selected by
 /// probing in priority order — first successful init wins.
 pub struct NeuralEngine {
-    embedder:  ModelHandle,
-    reranker:  ModelHandle,
-    generator: ModelHandle,
-    provider:  ExecutionProvider,
-    metrics:   Arc<Metrics>,
+    embedder:           ModelHandle,
+    reranker:           ModelHandle,
+    generator:          ModelHandle,
+    provider:           ExecutionProvider,
+    generator_max_new:  usize,
+    metrics:            Arc<Metrics>,
 }
 
 impl NeuralEngine {
@@ -116,7 +118,13 @@ impl NeuralEngine {
             });
         }
 
-        let provider = ExecutionProvider::Cpu;
+        // §7 probe order — CUDA → DirectML → CoreML → CPU (DEF-002). Each
+        // candidate is exercised against the embedder's model.onnx in a
+        // bounded-duration thread; any failure (EP unsupported, registration
+        // hang past the budget) falls through to the next candidate. CPU is
+        // the unconditional backstop.
+        let embedder_model = config.embedder_dir.join("model.onnx");
+        let provider       = probe_best_provider(&embedder_model);
 
         record_provider_gauge(&metrics, provider);
 
@@ -129,6 +137,7 @@ impl NeuralEngine {
             reranker,
             generator,
             provider,
+            generator_max_new: config.generator_max_tokens,
             metrics,
         })
     }
@@ -207,23 +216,42 @@ impl NeuralEngine {
 
     /// Generates a rewritten query string using the Qwen2.5 generator.
     ///
-    /// Used by `QueryProcessor` for LLM-assisted query understanding.
+    /// Greedy autoregressive decode (DEF-003): feed the prompt, take the
+    /// argmax over the final-step logits, append the token, and repeat until
+    /// EOS or `NeuralConfig::generator_max_tokens` new tokens have been
+    /// produced. No KV cache — the whole sequence is re-fed on every step.
+    /// Correct for any Qwen2.5 ONNX export; a KV-cache optimisation is a
+    /// later, purely internal improvement.
     pub fn generate(&mut self, prompt: &str) -> Result<String> {
-        let outputs = run_session(
-            &mut self.generator.session,
-            &self.generator.tokeniser,
-            &[prompt],
-            "generator",
-        )?;
+        let encoding = self.generator.tokeniser
+            .encode(prompt, true)
+            .map_err(|err| Error::Tokeniser {
+                path:   String::from("generator"),
+                reason: err.to_string(),
+            })?;
 
-        let tokens: Vec<u32> = outputs
-            .into_iter()
-            .flat_map(|v| v.into_iter().map(|f| f as u32))
-            .collect();
+        let mut tokens: Vec<u32> = encoding.get_ids().to_vec();
+        let prompt_len = tokens.len();
+        let eos_id     = self.generator.tokeniser
+            .token_to_id("<|endoftext|>")
+            .or_else(|| self.generator.tokeniser.token_to_id("<|im_end|>"));
 
-        self.generator
-            .tokeniser
-            .decode(&tokens, true)
+        let max_new = self.generator_max_new;
+        for _ in 0..max_new {
+            let next = generator_step(
+                &mut self.generator.session,
+                &tokens,
+            )?;
+            tokens.push(next);
+            if Some(next) == eos_id {
+                break;
+            }
+        }
+
+        // Decode only the newly generated tail so the prompt is not echoed.
+        let generated: &[u32] = tokens.get(prompt_len..).unwrap_or(&[]);
+        self.generator.tokeniser
+            .decode(generated, true)
             .map_err(|err| Error::Inference {
                 model:  String::from("generator"),
                 reason: err.to_string(),
@@ -247,11 +275,10 @@ fn record_provider_gauge(metrics: &Metrics, provider: ExecutionProvider) {
 
 /// Loads a model from `dir`, resolving `model.onnx` and `tokenizer.json`.
 ///
-/// Uses CPU execution provider only. CUDA EP registration blocks indefinitely
-/// on Linux systems with NVIDIA drivers but without CUDA toolkit ≥ 12.8.
-/// Both `model.onnx` and `tokenizer.json` must be present.
+/// The selected `provider` must already have survived `probe_best_provider`.
+/// Both `model.onnx` and `tokenizer.json` must be present in `dir`.
 /// Missing either returns `Error::ModelNotFound`.
-fn load_model(dir: &Path, _provider: ExecutionProvider) -> Result<ModelHandle> {
+fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
     let model_path     = dir.join("model.onnx");
     let tokeniser_path = dir.join("tokenizer.json");
 
@@ -261,15 +288,7 @@ fn load_model(dir: &Path, _provider: ExecutionProvider) -> Result<ModelHandle> {
         });
     }
 
-    // CPU-only execution provider list.
-    // ORT 2.0.0-rc.12 CUDA EP requires CUDA toolkit ≥ 12.8 + cuDNN ≥ 9.19.
-    // Attempting to register CUDA EP without the correct toolkit version
-    // blocks indefinitely in futex_wait_queue on Linux via libcuda.so
-    // constructor probing /dev/nvidiactl. CPU is always safe and available.
-    // CUDA can be re-enabled here once the correct toolkit is confirmed.
-    let eps: Vec<ExecutionProviderDispatch> = vec![
-        CPUExecutionProvider::default().into(),
-    ];
+    let eps: Vec<ExecutionProviderDispatch> = execution_providers_for(provider);
 
     let session = Session::builder()
         .map_err(|err| Error::OrtLoad {
@@ -294,6 +313,84 @@ fn load_model(dir: &Path, _provider: ExecutionProvider) -> Result<ModelHandle> {
         })?;
 
     Ok(ModelHandle { session, tokeniser })
+}
+
+/// Returns the list of execution provider dispatches for the selected
+/// provider, always terminated with CPU as the unconditional backstop.
+fn execution_providers_for(provider: ExecutionProvider) -> Vec<ExecutionProviderDispatch> {
+    match provider {
+        ExecutionProvider::Cuda     => vec![
+            CUDAExecutionProvider::default().build(),
+            CPUExecutionProvider::default().build(),
+        ],
+        ExecutionProvider::DirectMl => vec![
+            DirectMLExecutionProvider::default().build(),
+            CPUExecutionProvider::default().build(),
+        ],
+        ExecutionProvider::CoreMl   => vec![
+            CoreMLExecutionProvider::default().build(),
+            CPUExecutionProvider::default().build(),
+        ],
+        ExecutionProvider::Cpu      => vec![
+            CPUExecutionProvider::default().build(),
+        ],
+    }
+}
+
+/// Execution-provider probe (§7 / v1.8 §5.11 / DEF-002).
+///
+/// Each candidate is tried in priority order against `model_path` inside a
+/// bounded-duration thread. The first candidate that commits a session
+/// within the budget wins; everything else falls through to CPU.
+///
+/// The per-candidate budget is intentionally small — spec §5.11 says
+/// unavailable providers fail in microseconds. A budget of a few seconds
+/// gives real failure paths time to unwind without letting pathological
+/// registration blocks (e.g. libcuda.so with a missing toolkit) hang the
+/// whole process.
+fn probe_best_provider(model_path: &Path) -> ExecutionProvider {
+    const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+    for candidate in [
+        ExecutionProvider::Cuda,
+        ExecutionProvider::DirectMl,
+        ExecutionProvider::CoreMl,
+    ] {
+        if probe_provider(candidate, model_path, PROBE_BUDGET) {
+            return candidate;
+        }
+    }
+
+    ExecutionProvider::Cpu
+}
+
+/// Exercises `candidate` against `model_path` with a hard timeout.
+///
+/// Returns `true` if a session builds with the candidate as the primary EP
+/// within `budget`; `false` otherwise. Any panic, error, or timeout is
+/// treated as "unavailable."
+fn probe_provider(
+    candidate:  ExecutionProvider,
+    model_path: &Path,
+    budget:     std::time::Duration,
+) -> bool {
+    if !model_path.exists() {
+        return false;
+    }
+
+    let path = model_path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+
+    std::thread::spawn(move || {
+        let eps = execution_providers_for(candidate);
+        let ok  = Session::builder()
+            .and_then(|b| b.with_execution_providers(eps))
+            .and_then(|b| b.commit_from_file(&path))
+            .is_ok();
+        let _ = tx.send(ok);
+    });
+
+    rx.recv_timeout(budget).unwrap_or(false)
 }
 
 /// Tokenises `texts`, runs ONNX inference, and returns raw f32 output vectors.
@@ -382,6 +479,109 @@ fn run_session(
     Ok(result)
 }
 
+/// Runs one autoregressive decode step on the Qwen2.5 generator.
+///
+/// Feeds the full current token sequence, extracts the logits tensor
+/// (shape `[1, seq, vocab]`), argmaxes over the final position's logits,
+/// and returns the next token id. Called once per new token by
+/// `NeuralEngine::generate` (DEF-003). No KV cache — full sequence is
+/// re-fed on every step; correct for any Qwen2.5 export.
+fn generator_step(session: &mut Session, tokens: &[u32]) -> Result<u32> {
+    let seq = tokens.len();
+    if seq == 0 {
+        return Err(Error::Inference {
+            model:  String::from("generator"),
+            reason: String::from("cannot step on an empty token sequence"),
+        });
+    }
+
+    let ids:   Vec<i64> = tokens.iter().map(|&t| t as i64).collect();
+    let masks: Vec<i64> = vec![1i64; seq];
+
+    let ids_tensor = Tensor::<i64>::from_array(([1usize, seq], ids))
+        .map_err(|err| Error::Inference {
+            model:  String::from("generator"),
+            reason: err.to_string(),
+        })?;
+
+    let mask_tensor = Tensor::<i64>::from_array(([1usize, seq], masks))
+        .map_err(|err| Error::Inference {
+            model:  String::from("generator"),
+            reason: err.to_string(),
+        })?;
+
+    let outputs = session
+        .run(ort::inputs![
+            "input_ids"      => ids_tensor,
+            "attention_mask" => mask_tensor
+        ])
+        .map_err(|err| Error::Inference {
+            model:  String::from("generator"),
+            reason: err.to_string(),
+        })?;
+
+    let logits_value = outputs
+        .values()
+        .next()
+        .ok_or_else(|| Error::Inference {
+            model:  String::from("generator"),
+            reason: String::from("no output tensors returned"),
+        })?;
+
+    let (shape, slice) = logits_value
+        .try_extract_tensor::<f32>()
+        .map_err(|err| Error::Inference {
+            model:  String::from("generator"),
+            reason: err.to_string(),
+        })?;
+
+    // Qwen2.5 causal-LM head emits logits of shape [batch=1, seq, vocab].
+    // Argmax the final-step slice: logits[0, seq-1, :].
+    if shape.len() != 3 {
+        return Err(Error::Inference {
+            model:  String::from("generator"),
+            reason: format!("expected 3-D logits, got shape {shape:?}"),
+        });
+    }
+    let step_seq = shape[1] as usize;
+    let vocab    = shape[2] as usize;
+    if step_seq == 0 || vocab == 0 {
+        return Err(Error::Inference {
+            model:  String::from("generator"),
+            reason: format!("degenerate logits shape {shape:?}"),
+        });
+    }
+
+    let last_start = (step_seq - 1) * vocab;
+    let last_end   = last_start + vocab;
+    let last_logits = slice.get(last_start..last_end).ok_or_else(|| Error::Inference {
+        model:  String::from("generator"),
+        reason: String::from("logits slice shorter than shape implies"),
+    })?;
+
+    let next = argmax_u32(last_logits).ok_or_else(|| Error::Inference {
+        model:  String::from("generator"),
+        reason: String::from("empty final-step logits"),
+    })?;
+
+    Ok(next)
+}
+
+/// Returns the index of the maximum value in `values`, or `None` when empty.
+fn argmax_u32(values: &[f32]) -> Option<u32> {
+    let mut best_idx: usize = 0;
+    let mut best_val: f32   = f32::NEG_INFINITY;
+    let mut seen            = false;
+    for (i, &v) in values.iter().enumerate() {
+        if !seen || v > best_val {
+            best_idx = i;
+            best_val = v;
+            seen     = true;
+        }
+    }
+    seen.then_some(best_idx as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +614,28 @@ mod tests {
         let result = load_model(dir.path(), ExecutionProvider::Cpu);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::ModelNotFound { .. }));
+    }
+
+    #[test]
+    fn argmax_u32_returns_index_of_max() {
+        assert_eq!(argmax_u32(&[0.1, 0.9, 0.3]), Some(1));
+        assert_eq!(argmax_u32(&[-5.0, -1.0, -3.0]), Some(1));
+    }
+
+    #[test]
+    fn argmax_u32_handles_first_position() {
+        assert_eq!(argmax_u32(&[5.0, 1.0, 2.0]), Some(0));
+    }
+
+    #[test]
+    fn argmax_u32_handles_negatives() {
+        // Every value is negative; must still return a valid index, not skip
+        // to None because the default f32::NEG_INFINITY would otherwise match.
+        assert_eq!(argmax_u32(&[-10.0, -20.0, -5.0]), Some(2));
+    }
+
+    #[test]
+    fn argmax_u32_none_when_empty() {
+        assert_eq!(argmax_u32(&[]), None);
     }
 }
