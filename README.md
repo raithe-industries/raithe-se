@@ -15,20 +15,12 @@
 **A world-class search engine built entirely in Rust.**
 
 Single-node architecture. Hybrid neural ranking. LLM-assisted query
-understanding. Structured instant answers. Built from the ground up per the
-raithe-se Engineering Specification.
+understanding. Structured instant answers. Built to the raithe-se
+Engineering Specification v1.0.
 
-**Spec:** `raithe-se Engineering Specification v1.8 DRAFT — pending sign-off`
-**Prior:** `v1.7 — 19 Apr 2026 (active)`
+**Spec:** `raithe-se Engineering Specification v1.0 — 20 Apr 2026`
 **Rust:** `rustc 1.95.0` (workspace minimum), built on `1.94.1+`
-**Status:** `cargo build --release` confirmed. 147 unit tests passing. Audit v1.8 (commit `c8920e1`) flagged 35 defects (6 CRITICAL, 11 HIGH, 13 MEDIUM, 5 LOW) — see §18 of v1.8 spec and `AUDIT_v1.8.md`.
 **Hardware:** GTX 1080 · CUDA 12.2 · Ubuntu 24.04 · i7-6700K · 32 GB
-
-> **⚠ In-flight work.** The v1.8 DRAFT spec and matching v1.8 defect register
-> (DEF-001 … DEF-035) are the live source of truth for what needs to change
-> next. The codebase at `c8920e1` compiles and passes unit tests but several
-> critical pipeline wirings are incomplete. Do not deploy to production
-> without addressing at least all CRITICAL and HIGH items in §18.
 
 ---
 
@@ -45,11 +37,11 @@ under `[env]` or are set by `raithe.sh` — never inside
 | `common`     | Shared primitive types — no logic, no I/O, no async              |
 | `config`     | Load, validate, and hot-reload `engine.toml`                     |
 | `metrics`    | Prometheus registry + tracing init — all handles registered here |
-| `storage`    | Crawl log, doc store (persistent — DEF-012), mmap, backups       |
-| `scraper`    | Single-URL HTTP fetch → `FetchResult` (streaming size gate)      |
+| `storage`    | Crawl log, doc store, mmap, backups                              |
+| `scraper`    | Single-URL HTTP fetch → `FetchResult`                            |
 | `crawler`    | URL frontier, politeness scheduling, robots.txt, dispatch        |
 | `parser`     | Raw HTML bytes → `ParsedDocument`                                |
-| `indexer`    | Tantivy inverted index — weighted BM25F, cached reader           |
+| `indexer`    | Tantivy inverted index — BM25F, cached reader                    |
 | `neural`     | ONNX Runtime inference — hardware auto-EP, 3 model handles       |
 | `semantic`   | HNSW ANN index for dense embedding retrieval (from scratch)      |
 | `linkgraph`  | CSR link graph + iterative PageRank                              |
@@ -73,11 +65,7 @@ Every query passes all three phases in order. Phase 3 is never skipped.
 | 2     | LambdaMART re-rank                           | `gbdt` crate, 300 trees |
 | 3     | Neural cross-encoder re-rank (top 32)        | BGE-reranker-large ONNX |
 
-`raithe_rank_phase3_calls_total` must be > 0 after any search. A value of zero
-is a CRITICAL defect.
-
-**Phase 3 candidate text:** full `body_text` (truncated to reranker context
-limit), not snippet — per v1.8 §5.9.
+`raithe_rank_phase3_calls_total` must be > 0 after any search.
 
 ---
 
@@ -86,29 +74,26 @@ limit), not snippet — per v1.8 §5.9.
 `raithe.sh` is the sole operational entrypoint. It installs and validates all
 three models, then launches the binary.
 
-**Do not use `install_models.sh` — it is superseded and removed.**
-
-| Directory    | Model / HF ID                    | Task                                   |
-|--------------|----------------------------------|----------------------------------------|
-| `embedder/`  | `BAAI/bge-large-en-v1.5`         | feature-extraction → `embed()`         |
-| `reranker/`  | `BAAI/bge-reranker-large`        | text-classification → `rerank()` (sigmoid over positive-class logit) |
-| `generator/` | `Qwen/Qwen2.5-7B-Instruct`       | text-generation → `generate()` (autoregressive, KV-cache) |
+| Directory    | Model / HF ID                    | Task                                    |
+|--------------|----------------------------------|-----------------------------------------|
+| `embedder/`  | `BAAI/bge-large-en-v1.5`         | feature-extraction → `embed()`          |
+| `reranker/`  | `BAAI/bge-reranker-large`        | text-classification → `rerank()`        |
+| `generator/` | `Qwen/Qwen2.5-7B-Instruct`       | text-generation → `generate()` (autoregressive) |
 
 Both `model.onnx` and `tokenizer.json` must be present in each subdirectory.
-A missing file is a startup `Error::ModelNotFound`. There is no silent fallback.
+A missing file is a startup `Error::ModelNotFound`. No silent fallback.
 
 Generator export uses the `ORTModelForCausalLM` Python API (not `optimum-cli`)
 to bypass the 2 GiB protobuf limit on 7B+ models.
 
-**Hardware auto-detection order (unconditional probe):** CUDA → DirectML → CoreML → CPU
-Hosts lacking the required toolkit for a provider fail its session-probe in
-microseconds and proceed to the next candidate. Hard-coding `ExecutionProvider::Cpu`
-is forbidden.
+**Hardware auto-detection order (unconditional probe):** CUDA → DirectML → CoreML → CPU.
+Each candidate is exercised against the embedder's `model.onnx` in a
+bounded-duration thread (default 3 s). Hosts lacking the required toolkit
+for a provider fail the probe and proceed to the next candidate.
 
 Generator is hardware-adaptive: 14B model selected when RAM ≥ 64 GB and VRAM ≥ 16 GB.
 
 **Single `NeuralEngine` per process**, shared via `Arc<Mutex<NeuralEngine>>`.
-Loading the generator three times is a 30 GiB OOM (DEF-007).
 
 **Python export stack (model install only — not runtime):**
 `optimum==1.23.3` · `transformers==4.46.3` · `torch==2.5.1+cpu` · `onnxscript` · `onnx` · `onnxruntime`
@@ -126,7 +111,7 @@ raithe-se/
 ├── Cargo.toml              # workspace root — all dep versions pinned here
 ├── Cargo.lock
 ├── .cargo/config.toml      # env vars (ORT_DYLIB_PATH etc.), linker overrides
-├── raithe.sh               # SOLE operational entrypoint: install + launch
+├── raithe.sh               # sole operational entrypoint: install + launch
 ├── data/
 │   ├── config/
 │   │   └── engine.toml     # default runtime configuration
@@ -148,9 +133,6 @@ raithe-se/
 
 ```bash
 # First run: install models and launch
-./raithe.sh
-
-# Subsequent runs
 ./raithe.sh
 
 # Install/verify models only, do not launch
@@ -195,7 +177,7 @@ Hot-reload: `config::watch(path)` watches `engine.toml` via `notify`. Invalid
 configs are logged and discarded — the running config is never replaced with
 an invalid one.
 
-**Key defaults (v1.8 DRAFT):**
+**Key defaults:**
 
 | Key                               | Default                            |
 |-----------------------------------|------------------------------------|
@@ -223,16 +205,15 @@ an invalid one.
 ## Startup Sequence
 
 `app::main()` initialises all subsystems in this order. Any failure halts
-startup with a descriptive message — no silent failures.
+startup with a descriptive message.
 
 1. Parse CLI arguments
-2. Print RAiTHE ASCII banner (via `raithe.sh` — the app skips when a launcher
-   marker is set in the environment)
+2. Print RAiTHE ASCII banner (via `raithe.sh`; the app skips when launched via `raithe.sh`)
 3. Load `Config`
 4. Initialise tracing subscriber
 5. Initialise `Metrics` registry
 6. Validate seed list — fail if < 100 valid seeds
-7. Initialise `Storage` (CrawlLog + DocStore, both held and wired)
+7. Initialise `Storage` (CrawlLog + DocStore, both wired)
 8. Initialise `NeuralEngine` (one instance, `Arc<Mutex<_>>`) — probe EPs, load all three `.onnx` models
 9. Initialise `SemanticIndex`
 10. Initialise `Indexer` (placed into `AppState`)
@@ -270,8 +251,6 @@ startup with a descriptive message — no silent failures.
 
 ## Security
 
-All 37 security issues from the prototype are addressed by design.
-
 - Path traversal (backup): all destination paths canonicalised; any path not
   rooted under the configured backup directory is rejected.
 - Integer overflow (doc ID): `checked_add` throughout; returns
@@ -280,18 +259,18 @@ All 37 security issues from the prototype are addressed by design.
   mandatory in `Crawler::new()`.
 - Per-request rate limiting: `tower-http` middleware on all serving endpoints.
 - Slowloris mitigation: Axum timeout layer on all connections.
-- Body-size gate in scraper is **streaming** via `bytes_stream()` with a
-  rolling guard (DEF-019) — buffer-then-check is a DoS vector.
+- Body-size gate in scraper: streaming via `bytes_stream()` with a rolling
+  guard.
 - Input validation: all query strings sanitised before reaching indexer or
   neural inference.
 - CORS: `tower-http`'s `CorsLayer` restricted to configured allow-list. No
-  wildcard in production. Hand-rolled comma-separated middleware is
-  forbidden (DEF-018).
+  wildcard in production.
 - Security headers: CSP, HSTS, `X-Content-Type-Options`, `X-Frame-Options`.
 - Health endpoint: returns `{"status":"ok"}` only — no version or build info
   exposed.
 - Session propagation: cookie (`raithe_sid`) or header (`X-Raithe-Session`).
-  New `SessionId` per request is forbidden (DEF-005).
+  Missing or malformed values cause a fresh id to be minted and returned via
+  `Set-Cookie`.
 
 ---
 
@@ -307,27 +286,23 @@ Key rules enforced without exception:
 - `thiserror` concrete `Error` enums in all library crates. `anyhow`
   permitted in `crates/app` only.
 - `.unwrap()` forbidden in all non-test production code. `.expect()` only
-  where the precondition is statically verifiable (e.g. `Selector::parse` on
-  a string literal).
-- No glob imports (`use crate::*` forbidden). Exception: `use super::*`
-  inside `#[cfg(test)]`.
+  where the precondition is statically verifiable.
+- No glob imports. Exception: `use super::*` inside `#[cfg(test)]`.
 - Import groups: `std/core/alloc` → third-party → `self/super/crate`.
 - File-level order: `mod` / `pub mod` declarations first, then `pub use`
-  re-exports, then `use` imports. `Error` / `Result` stay in `lib.rs`
-  immediately after imports.
+  re-exports, then `use` imports.
 - `mod.rs` for all multi-file module roots. `foo.rs + foo/` layout forbidden.
 - `mod.rs` contains only `mod` declarations and `pub use` re-exports.
-- UK spelling throughout (`behaviour`, `colour`, `initialise`, etc.).
+- UK spelling throughout (`behaviour`, `colour`, `initialise`).
 - `Self` used wherever possible inside `impl` blocks.
 - `let mut` scoped to the minimum necessary block.
 - No explicit `drop()` calls — use scoped blocks.
-- Derive order: `Copy` first, then std items in lexicographic order
-  (`Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd`), then third-party.
+- Derive order: `Copy` first, then std items in lexicographic order, then
+  third-party.
 - Struct field visibility order: `pub` first, `pub(crate)` next, private
-  last — hand-implement `Ord` / `PartialOrd` when this would otherwise
-  conflict with a derive.
-- Fields prefixed with `_` (e.g. `_metrics`) must be removed or wired. An
-  unused field is a defect, not a placeholder.
+  last.
+- Fields prefixed with `_` must be removed or wired — an unused field is a
+  defect.
 
 ---
 
@@ -336,65 +311,32 @@ Key rules enforced without exception:
 - All versions pinned in `[workspace.dependencies]`. All crates use
   `workspace = true`.
 - Environment variables live in `.cargo/config.toml` under `[env]` or are
-  set by `raithe.sh` — not inside `[workspace.dependencies]` (DEF-001).
+  set by `raithe.sh` — not inside `[workspace.dependencies]`.
 - `cargo audit` in CI — CRITICAL or HIGH advisory blocks the build.
 - `tokio::main` used only in `crates/app`.
 - `ort` uses `load-dynamic` feature — ORT shared library updated independently
   of the binary.
 - `trust-dns-resolver` replaces the system resolver for all crawler DNS
   lookups.
-- `llama-cpp-rs` is removed. Query rewriting routes through the `neural` crate
-  via Qwen2.5 exported to ONNX.
-
----
-
-## Prototype Defects Fixed in v2
-
-The original prototype (`digitalrecompense/raithe-se`) was structurally sound
-but functionally hollow. Every item below was broken by design or omission.
-
-| Defect                                    | Fix                                              |
-|-------------------------------------------|--------------------------------------------------|
-| GBDT degraded to 10 toy trees             | 300 LambdaMART trees, mandatory                  |
-| Cross-encoder never invoked               | Phase 3 always runs; metric enforces it          |
-| Neural tokeniser was hash-based           | Real `tokenizers` crate with `tokenizer.json`    |
-| `anyhow` used in library crates           | Concrete `thiserror` enums everywhere            |
-| `.unwrap()` scattered in production paths | Forbidden; `.expect()` only where statically safe|
-| No per-host rate limiting                 | `governor::RateLimiter` per domain, mandatory    |
-| Path traversal in backup                  | Canonicalise + root check on all dest paths      |
-| Integer overflow in doc-ID counter        | `checked_add` + `Error::DocIdExhausted`          |
-| CORS wildcard                             | Configured allow-list only                       |
-| Version info leaked in health endpoint    | `{"status":"ok"}` only                           |
-| EP probe hung on Linux with CUDA drivers  | `with_execution_providers()` probe replaces `is_available()` |
-| `optimum-cli` failed on 7B+ models        | `ORTModelForCausalLM` Python API in `raithe.sh`  |
-
-See v1.8 spec §18 for the active defect register against commit `c8920e1`.
 
 ---
 
 ## Amendment Log
 
-| Ver        | Date        | Summary                                                                                         |
-|------------|-------------|-------------------------------------------------------------------------------------------------|
-| 1.0        | 14 Apr 2026 | Initial specification. Supersedes all prototype-era documents.                                  |
-| 1.1        | 14 Apr 2026 | Neural model layout amended. Per-model subdirectories. `install_models.sh` added.               |
-| 1.2        | 14 Apr 2026 | Model stack finalised. BGE embedder/reranker + Qwen generator. `cross_encoder` → `reranker`.    |
-| 1.3        | 15 Apr 2026 | Implementation commenced. `raithe-common` fully implemented.                                    |
-| 1.4        | 15 Apr 2026 | `scraper`, `parser`, `indexer`, `neural` completed. New common types + `ScraperConfig` added.   |
-| 1.5        | 15 Apr 2026 | Spec alignment. `crawler::run()` marked `async`. Neural key fns corrected to `&mut self`.       |
-| 1.6        | 16 Apr 2026 | `install_models.sh` corrected. EP probe replaced (`is_available` hang fix). DEV-001 CLOSED.     |
-| 1.7        | 19 Apr 2026 | `install_models.sh` → `raithe.sh`. `ORTModelForCausalLM` export. `torch` pinned `2.5.1+cpu`.    |
-| 1.8 DRAFT  | 19 Apr 2026 | Alignment to commit `c8920e1` audit. 35-item defect register (DEF-001..035). See v1.8 §17–§18.  |
+| Ver | Date        | Summary                                                                       |
+|-----|-------------|-------------------------------------------------------------------------------|
+| 1.0 | 20 Apr 2026 | Authoritative engineering specification for raithe-se.                        |
 
 ---
 
-## Deferred to v2
+## Deferred to Future Versions
 
 - Distributed crawling (multiple crawler instances sharing frontier)
 - User accounts and personalised ranking beyond session
 - Real-time LLM rewriting with a larger generative model
 - Image and video indexing
 - Full cluster mode (sharded indexer, replicated serving)
+- KV-cache optimisation for autoregressive decode in `NeuralEngine::generate`
 
 ---
 

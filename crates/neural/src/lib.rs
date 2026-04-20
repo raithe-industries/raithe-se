@@ -383,14 +383,24 @@ fn probe_provider(
 
     std::thread::spawn(move || {
         let eps = execution_providers_for(candidate);
-        let ok  = Session::builder()
-            .and_then(|b| b.with_execution_providers(eps))
-            .and_then(|b| b.commit_from_file(&path))
-            .is_ok();
+        let ok  = probe_once(eps, &path).is_ok();
         let _ = tx.send(ok);
     });
 
     rx.recv_timeout(budget).unwrap_or(false)
+}
+
+/// Executes one end-to-end session build for probe purposes. Kept separate
+/// from `probe_provider` so the `?` operator can flow across the three
+/// different `ort::Error<T>` phantom types returned by each builder stage.
+fn probe_once(
+    eps:  Vec<ExecutionProviderDispatch>,
+    path: &Path,
+) -> std::result::Result<Session, Box<dyn std::error::Error + Send + Sync>> {
+    let builder = Session::builder()?;
+    let builder = builder.with_execution_providers(eps)?;
+    let session = builder.commit_from_file(path)?;
+    Ok(session)
 }
 
 /// Tokenises `texts`, runs ONNX inference, and returns raw f32 output vectors.
