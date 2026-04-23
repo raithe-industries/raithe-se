@@ -390,16 +390,35 @@ fn probe_provider(
     rx.recv_timeout(budget).unwrap_or(false)
 }
 
-/// Executes one end-to-end session build for probe purposes. Kept separate
-/// from `probe_provider` so the `?` operator can flow across the three
-/// different `ort::Error<T>` phantom types returned by each builder stage.
-fn probe_once(
-    eps:  Vec<ExecutionProviderDispatch>,
-    path: &Path,
-) -> std::result::Result<Session, Box<dyn std::error::Error + Send + Sync>> {
-    let builder = Session::builder()?;
-    let builder = builder.with_execution_providers(eps)?;
-    let session = builder.commit_from_file(path)?;
+/// Attempts one end-to-end session build against `path` with the given EPs.
+///
+/// Returns `Error::OrtLoad` on any builder-stage failure. Called from
+/// `probe_provider` through a short-lived thread; only `.is_ok()` is tested
+/// at the call site.
+///
+/// # Why not `Box<dyn Error + Send + Sync>`?
+///
+/// `ort::Error<SessionBuilder>` is deliberately `!Send + !Sync` — it holds
+/// `NonNull<OrtSessionOptions>` and related raw pointer types so the builder
+/// can be returned to the caller on error for recovery. The `?` operator
+/// would need to coerce that into `Box<dyn Error + Send + Sync>`, which the
+/// compiler rejects with E0277. Using the local `Result<Session>` and mapping
+/// each stage with `.map_err(|e| Error::OrtLoad { … e.to_string() … })`
+/// converts the error through `Display`, which has no thread-safety bounds.
+fn probe_once(eps: Vec<ExecutionProviderDispatch>, path: &Path) -> Result<Session> {
+    let path_str = path.display().to_string();
+    let builder = Session::builder().map_err(|e| Error::OrtLoad {
+        path:   path_str.clone(),
+        reason: e.to_string(),
+    })?;
+    let builder = builder.with_execution_providers(eps).map_err(|e| Error::OrtLoad {
+        path:   path_str.clone(),
+        reason: e.to_string(),
+    })?;
+    let session = builder.commit_from_file(path).map_err(|e| Error::OrtLoad {
+        path:   path_str,
+        reason: e.to_string(),
+    })?;
     Ok(session)
 }
 
