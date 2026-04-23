@@ -374,8 +374,28 @@ try:
         onnx_config_ctor = TasksManager._SUPPORTED_MODEL_TYPE["qwen2"]["onnx"]["text-generation-with-past"]
         onnx_config = onnx_config_ctor(hf_config, use_past=True)
 
-        model = AutoModelForCausalLM.from_pretrained(
-            str(work), trust_remote_code=True, torch_dtype=torch.float32,
+    model = AutoModelForCausalLM.from_pretrained(
+        str(work), trust_remote_code=True, torch_dtype=torch.float32,
+    )
+    model.eval()
+
+    dummy_inputs = onnx_config.generate_dummy_inputs(framework="pt")
+    input_names = list(dummy_inputs.keys())
+    output_names = list(onnx_config.outputs.keys())
+    dynamic_axes = {**onnx_config.inputs, **onnx_config.outputs}
+
+    with torch.no_grad():
+        torch.onnx.export(
+            model,
+            tuple(dummy_inputs.values()),
+            str(out_path),
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            opset_version=14,
+            do_constant_folding=False,
+            onnx_shape_inference=False,
+            use_external_data_format=True,
         )
         model.eval()
 
