@@ -1,0 +1,35 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-app"
+description = "Single-binary entry point — init sequence, banner, async runtime"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+
+[[bin]]
+name = "raithe-se"
+path = "src/main.rs"
+
+[dependencies]
+raithe-common     = { path = "../common" }
+raithe-config     = { path = "../config" }
+raithe-metrics    = { path = "../metrics" }
+raithe-storage    = { path = "../storage" }
+raithe-crawler    = { path = "../crawler" }
+raithe-scraper    = { path = "../scraper" }
+raithe-parser     = { path = "../parser" }
+raithe-indexer    = { path = "../indexer" }
+raithe-neural     = { path = "../neural" }
+raithe-semantic   = { path = "../semantic" }
+raithe-linkgraph  = { path = "../linkgraph" }
+raithe-ranker     = { path = "../ranker" }
+raithe-query      = { path = "../query" }
+raithe-instant    = { path = "../instant" }
+raithe-freshness  = { path = "../freshness" }
+raithe-session    = { path = "../session" }
+raithe-serving    = { path = "../serving" }
+tokio             = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }

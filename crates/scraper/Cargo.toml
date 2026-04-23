@@ -1,0 +1,17 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-scraper"
+description = "Single-URL HTTP fetch — raw bytes + response metadata"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+authors.workspace   = true
+repository.workspace = true
+
+[dependencies]
+raithe-common  = { path = "../common" }
+raithe-config  = { path = "../config" }
+raithe-metrics = { path = "../metrics" }
+reqwest        = { workspace = true }
+tokio          = { workspace = true }
+thiserror      = { workspace = true }

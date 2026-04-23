@@ -1,0 +1,26 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-ranker"
+description = "Three-phase ranking: BM25F → GBDT (300 trees) → cross-encoder"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+authors.workspace   = true
+repository.workspace = true
+
+[dependencies]
+raithe-common    = { path = "../common" }
+raithe-config    = { path = "../config" }
+raithe-metrics   = { path = "../metrics" }
+raithe-neural    = { path = "../neural" }
+raithe-linkgraph = { path = "../linkgraph" }
+gbdt             = { workspace = true }
+thiserror        = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile  = { workspace = true }
+
+[[bench]]
+name    = "ranker_latency"
+harness = false

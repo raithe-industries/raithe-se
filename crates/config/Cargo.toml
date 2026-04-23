@@ -1,0 +1,17 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-config"
+description = "Config loading, validation, and hot-reload"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+authors.workspace   = true
+repository.workspace = true
+
+[dependencies]
+raithe-common = { path = "../common" }
+figment       = { workspace = true }
+notify        = { workspace = true }
+serde         = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true }

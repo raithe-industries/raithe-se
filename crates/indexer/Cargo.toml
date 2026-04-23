@@ -1,0 +1,28 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-indexer"
+description = "Tantivy inverted index — schema, tokeniser, ingestion, search"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+
+[dependencies]
+raithe-common  = { path = "../common" }
+raithe-config  = { path = "../config" }
+raithe-metrics = { path = "../metrics" }
+raithe-storage = { path = "../storage" }
+raithe-parser  = { path = "../parser" }
+tantivy        = { workspace = true }
+unicode-normalization = { workspace = true }
+rust-stemmers  = { workspace = true }
+thiserror      = { workspace = true }
+
+[dev-dependencies]
+tempfile  = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name    = "indexer_throughput"
+harness = false

@@ -1,0 +1,15 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+# .cargo/config.toml
+#
+# Workspace-level Cargo configuration.
+#
+# The ort static archive (libort_sys) references glibc 2.38 C23 symbols
+# (__isoc23_strtol*, __isoc23_strtoull) that lld does not resolve correctly
+# in debug builds on this system. Switch debug link to the system gcc linker
+# which resolves them via libgcc/glibc correctly.
+#
+# Release builds use lld (set in [profile.release] via Cargo.toml) and are
+# unaffected — the release binary links and runs correctly.
+
+[target.x86_64-unknown-linux-gnu]
+linker = "gcc"

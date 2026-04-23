@@ -1,0 +1,23 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-crawler"
+description = "URL frontier, politeness scheduling, robots.txt, dispatch"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+authors.workspace   = true
+repository.workspace = true
+
+[dependencies]
+raithe-common  = { path = "../common" }
+raithe-config  = { path = "../config" }
+raithe-metrics = { path = "../metrics" }
+raithe-storage = { path = "../storage" }
+raithe-scraper = { path = "../scraper" }
+governor       = { workspace = true }
+rusqlite       = { workspace = true }
+moka           = { workspace = true }
+trust-dns-resolver = { workspace = true }
+tokio          = { workspace = true }
+tracing        = { workspace = true }
+thiserror      = { workspace = true }

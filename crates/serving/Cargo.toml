@@ -1,0 +1,28 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-serving"
+description = "Axum HTTP server + search UI + security middleware"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+authors.workspace   = true
+repository.workspace = true
+
+[dependencies]
+raithe-common    = { path = "../common" }
+raithe-config    = { path = "../config" }
+raithe-indexer   = { path = "../indexer" }
+raithe-metrics   = { path = "../metrics" }
+raithe-query     = { path = "../query" }
+raithe-ranker    = { path = "../ranker" }
+raithe-instant   = { path = "../instant" }
+raithe-session   = { path = "../session" }
+raithe-linkgraph = { path = "../linkgraph" }
+axum             = { workspace = true }
+tower            = { workspace = true }
+tower-http       = { workspace = true }
+askama           = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+tokio            = { workspace = true }
+thiserror        = { workspace = true }

@@ -1,0 +1,16 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+[package]
+name        = "raithe-freshness"
+description = "Incremental re-crawl pipeline — staleness, tombstones"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+authors.workspace   = true
+repository.workspace = true
+
+[dependencies]
+raithe-common  = { path = "../common" }
+raithe-config  = { path = "../config" }
+raithe-storage = { path = "../storage" }
+raithe-crawler = { path = "../crawler" }
+thiserror      = { workspace = true }
