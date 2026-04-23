@@ -502,6 +502,7 @@ try:
     import torch
     import torch.onnx._globals as onnx_globals
     import onnx
+    import subprocess
     from transformers import AutoModelForCausalLM, AutoConfig
     from optimum.exporters.tasks import TasksManager
 except ImportError as e:
@@ -516,9 +517,30 @@ out_path = out_dir / "model.onnx"
 onnx_globals.GLOBALS.onnx_shape_inference = False
 
 try:
-    hf_config = AutoConfig.from_pretrained(str(work), trust_remote_code=True)
-    onnx_config_ctor = TasksManager._SUPPORTED_MODEL_TYPE["qwen2"]["onnx"]["text-generation-with-past"]
-    onnx_config = onnx_config_ctor(hf_config, use_past=True)
+    try:
+        subprocess.run(
+            [
+                "optimum-cli",
+                "export",
+                "onnx",
+                "-m",
+                str(work),
+                "--task",
+                "text-generation-with-past",
+                "--framework",
+                "pt",
+                "--dtype",
+                "fp32",
+                "--monolith",
+                "--trust-remote-code",
+                str(out_dir),
+            ],
+            check=True,
+        )
+    except Exception:
+        hf_config = AutoConfig.from_pretrained(str(work), trust_remote_code=True)
+        onnx_config_ctor = TasksManager._SUPPORTED_MODEL_TYPE["qwen2"]["onnx"]["text-generation-with-past"]
+        onnx_config = onnx_config_ctor(hf_config, use_past=True)
 
     model = AutoModelForCausalLM.from_pretrained(
         str(work), trust_remote_code=True, torch_dtype=torch.float32,
@@ -543,6 +565,27 @@ try:
             onnx_shape_inference=False,
             use_external_data_format=True,
         )
+        model.eval()
+
+        dummy_inputs = onnx_config.generate_dummy_inputs(framework="pt")
+        input_names = list(dummy_inputs.keys())
+        output_names = list(onnx_config.outputs.keys())
+        dynamic_axes = {**onnx_config.inputs, **onnx_config.outputs}
+
+        with torch.no_grad():
+            torch.onnx.export(
+                model=model,
+                args=(),
+                kwargs=dummy_inputs,
+                f=str(out_path),
+                input_names=input_names,
+                output_names=output_names,
+                dynamic_axes=dynamic_axes,
+                opset_version=14,
+                do_constant_folding=False,
+                onnx_shape_inference=False,
+                use_external_data_format=True,
+            )
 
     # Re-save to guarantee proper external data layout (single file, no threshold)
     m = onnx.load(str(out_path), load_external_data=True)
