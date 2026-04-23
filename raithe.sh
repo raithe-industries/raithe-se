@@ -311,105 +311,22 @@ PYEOF
     rm -rf "$work/onnx"
     mkdir -p "$work/onnx"
 
-    if [[ "$task" == "text-generation" ]]; then
-        # >2GB protobuf wall is hit during torch.onnx shape inference pass,
-        # BEFORE file write — so use_external_data_format=True alone fails.
-        # Fix: disable shape inference globally, then export to file path,
-        # then re-save with proper external data split via onnx.save_model.
-        set +e
-        OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
-        python3 - >"$work/export.log" 2>&1 <<PYEOF
-import os, sys, warnings, logging
-from pathlib import Path
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["TQDM_DISABLE"]           = "1"
-os.environ["OMP_NUM_THREADS"]        = "${CPU_CORES}"
-os.environ["MKL_NUM_THREADS"]        = "${CPU_CORES}"
-warnings.filterwarnings("ignore")
-logging.getLogger("transformers").setLevel(logging.ERROR)
-logging.getLogger("optimum").setLevel(logging.ERROR)
-logging.getLogger("torch").setLevel(logging.ERROR)
-
-try:
-    import torch
-    import torch.onnx._globals as onnx_globals
-    import onnx
-    from transformers import AutoModelForCausalLM, AutoConfig
-    from optimum.exporters.tasks import TasksManager
-except ImportError as e:
-    print(f"IMPORT_ERROR: {e}", file=sys.stderr); sys.exit(2)
-
-work = Path("${work}")
-out_dir = work / "onnx"
-out_dir.mkdir(parents=True, exist_ok=True)
-out_path = out_dir / "model.onnx"
-
-# Kill the shape inference pass — this is what triggers the 2GB protobuf serialize
-onnx_globals.GLOBALS.onnx_shape_inference = False
-
-try:
-    hf_config = AutoConfig.from_pretrained(str(work), trust_remote_code=True)
-    onnx_config_ctor = TasksManager._SUPPORTED_MODEL_TYPE["qwen2"]["onnx"]["text-generation-with-past"]
-    onnx_config = onnx_config_ctor(hf_config, use_past=True)
-
-    model = AutoModelForCausalLM.from_pretrained(
-        str(work), trust_remote_code=True, torch_dtype=torch.float32,
-    )
-    model.eval()
-
-    dummy_inputs = onnx_config.generate_dummy_inputs(framework="pt")
-    input_names = list(dummy_inputs.keys())
-    output_names = list(onnx_config.outputs.keys())
-    dynamic_axes = {**onnx_config.inputs, **onnx_config.outputs}
-
-    with torch.no_grad():
-        torch.onnx.export(
-            model,
-            tuple(dummy_inputs.values()),
-            str(out_path),
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes,
-            opset_version=14,
-            do_constant_folding=False,
-            use_external_data_format=True,
-        )
-
-    # Re-save to guarantee proper external data layout (single file, no threshold)
-    m = onnx.load(str(out_path), load_external_data=True)
-    onnx.save_model(
-        m,
-        str(out_path),
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location="model.onnx_data",
-        size_threshold=0,
-        convert_attribute=False,
-    )
-    print("OK", flush=True)
-except Exception as e:
-    import traceback; traceback.print_exc()
-    print(f"EXPORT_ERROR: {type(e).__name__}: {e}", file=sys.stderr); sys.exit(3)
-PYEOF
-        export_rc=$?
-        set -e
-        if [[ $export_rc -ne 0 ]]; then
-            echo -e "${RED}✗ ONNX export failed for $hf_id — exit $export_rc${RESET}" >&2
-            cat "$work/export.log" >&2
-            fail "ONNX export failed for $hf_id ($task)"
-        fi
-        else
-        local export_flags="--framework pt --dtype fp32 --monolith"
-        # shellcheck disable=SC2086
-        OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
-        optimum-cli export onnx \
-            -m "$work" --task "$task" $export_flags "$work/onnx" \
-            >"$work/export.log" 2>&1 || {
-            echo -e "${RED}✗ ONNX export failed for $hf_id${RESET}" >&2
-            cat "$work/export.log" >&2
-            fail "ONNX export failed for $hf_id ($task)"
-        }
-    fi
+    # optimum-cli handles every pinned task (feature-extraction,
+    # text-classification, text-generation, text2text-generation) and auto-
+    # splits model weights into model.onnx_data when the graph exceeds the
+    # 2 GiB protobuf single-message limit. task=text-generation (no
+    # -with-past) produces a single decoder graph matching the Rust
+    # generator_step re-feed contract (neural/src/lib.rs §NeuralEngine::generate).
+    local export_flags="--framework pt --dtype fp32 --monolith"
+    # shellcheck disable=SC2086
+    OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
+    optimum-cli export onnx \
+        -m "$work" --task "$task" $export_flags "$work/onnx" \
+        >"$work/export.log" 2>&1 || {
+        echo -e "${RED}✗ ONNX export failed for $hf_id${RESET}" >&2
+        cat "$work/export.log" >&2
+        fail "ONNX export failed for $hf_id ($task)"
+    }
 
     local onnx_check
     onnx_check=$(find "$work/onnx" -name "*.onnx" -size +0c | head -n 1 || true)

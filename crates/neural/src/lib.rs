@@ -453,7 +453,7 @@ fn run_session(
             let pad = max_len - row.len();
             row.iter()
                 .map(|&id| id as i64)
-                .chain(std::iter::repeat(0i64).take(pad))
+                .chain(std::iter::repeat_n(0i64, pad))
         })
         .collect();
 
@@ -464,7 +464,7 @@ fn run_session(
             let pad = max_len - row.len();
             row.iter()
                 .map(|&m| m as i64)
-                .chain(std::iter::repeat(0i64).take(pad))
+                .chain(std::iter::repeat_n(0i64, pad))
         })
         .collect();
 
