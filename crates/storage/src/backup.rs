@@ -116,7 +116,10 @@ mod tests {
 
     fn make_src(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
         let path = dir.join(name);
-        std::fs::File::create(&path).unwrap().write_all(content).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(content)
+            .unwrap();
         path
     }
 

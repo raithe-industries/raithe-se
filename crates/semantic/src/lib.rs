@@ -23,19 +23,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug)]
 pub struct HnswConfig {
     /// Maximum number of neighbours retained per node per layer (M).
-    pub m:            usize,
+    pub m: usize,
     /// Candidate list size during construction (ef_construction).
     pub ef_construct: usize,
     /// Candidate list size during search (ef_search).
-    pub ef_search:    usize,
+    pub ef_search: usize,
 }
 
 impl Default for HnswConfig {
     fn default() -> Self {
         Self {
-            m:            16,
+            m: 16,
             ef_construct: 200,
-            ef_search:    50,
+            ef_search: 50,
         }
     }
 }
@@ -43,14 +43,14 @@ impl Default for HnswConfig {
 /// A stored embedding entry.
 #[derive(Clone, Debug)]
 pub struct EmbeddingRecord {
-    pub id:     DocumentId,
+    pub id: DocumentId,
     pub vector: Vec<f32>,
 }
 
 // ── Internal node ────────────────────────────────────────────────────────────
 
 struct Node {
-    record:    EmbeddingRecord,
+    record: EmbeddingRecord,
     /// Neighbours per layer. `neighbours[0]` is the base layer.
     neighbours: Vec<Vec<usize>>,
 }
@@ -60,7 +60,7 @@ struct Node {
 /// `(distance, node_index)` ordered by distance ascending (min-heap via negation).
 #[derive(Clone, Copy, PartialEq)]
 struct Candidate {
-    dist:  f32,
+    dist: f32,
     index: usize,
 }
 
@@ -75,7 +75,9 @@ impl PartialOrd for Candidate {
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse so BinaryHeap becomes a min-heap on distance.
-        other.dist.partial_cmp(&self.dist)
+        other
+            .dist
+            .partial_cmp(&self.dist)
             .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
@@ -87,21 +89,21 @@ impl Ord for Candidate {
 /// Thread-safety: the index is not `Sync` — wrap in `Mutex` or `RwLock` if
 /// shared across threads. `insert` takes `&mut self`; `search` takes `&self`.
 pub struct SemanticIndex {
-    nodes:       Vec<Node>,
+    nodes: Vec<Node>,
     id_to_index: HashMap<DocumentId, usize>,
     entry_point: Option<usize>,
-    max_layer:   usize,
-    config:      HnswConfig,
+    max_layer: usize,
+    config: HnswConfig,
 }
 
 impl SemanticIndex {
     /// Creates an empty index with the given configuration.
     pub fn new(config: HnswConfig) -> Self {
         Self {
-            nodes:       Vec::new(),
+            nodes: Vec::new(),
             id_to_index: HashMap::new(),
             entry_point: None,
-            max_layer:   0,
+            max_layer: 0,
             config,
         }
     }
@@ -125,7 +127,7 @@ impl SemanticIndex {
         }
 
         let node_index = self.nodes.len();
-        let level      = self.random_level();
+        let level = self.random_level();
         let max_layers = level + 1;
 
         let record = EmbeddingRecord {
@@ -139,7 +141,7 @@ impl SemanticIndex {
 
         if self.entry_point.is_none() {
             self.entry_point = Some(node_index);
-            self.max_layer   = level;
+            self.max_layer = level;
             return Ok(());
         }
 
@@ -154,8 +156,7 @@ impl SemanticIndex {
         // For each layer from min(level, max_layer) down to 0, find
         // ef_construct candidates and wire bidirectional edges.
         for lc in (0..=level.min(self.max_layer)).rev() {
-            let candidates =
-                self.search_layer(&embedding.values, ep, self.config.ef_construct, lc);
+            let candidates = self.search_layer(&embedding.values, ep, self.config.ef_construct, lc);
 
             let neighbours: Vec<usize> = candidates
                 .iter()
@@ -178,7 +179,7 @@ impl SemanticIndex {
         }
 
         if level > self.max_layer {
-            self.max_layer   = level;
+            self.max_layer = level;
             self.entry_point = Some(node_index);
         }
 
@@ -189,11 +190,7 @@ impl SemanticIndex {
     ///
     /// Results are ordered by similarity descending (most similar first).
     /// Returns `Error::Empty` when the index contains no documents.
-    pub fn search(
-        &self,
-        query_embedding: &Embedding,
-        k: usize,
-    ) -> Result<Vec<(DocumentId, f32)>> {
+    pub fn search(&self, query_embedding: &Embedding, k: usize) -> Result<Vec<(DocumentId, f32)>> {
         let entry = self.entry_point.ok_or(Error::Empty)?;
 
         let query = &query_embedding.values;
@@ -209,7 +206,7 @@ impl SemanticIndex {
             .into_iter()
             .take(k)
             .map(|c| {
-                let id         = self.nodes[c.index].record.id;
+                let id = self.nodes[c.index].record.id;
                 let similarity = 1.0 - c.dist;
                 (id, similarity)
             })
@@ -222,19 +219,19 @@ impl SemanticIndex {
 
     /// Greedy single-path descent — returns the closest node index at `layer`.
     fn greedy_search_layer(&self, query: &[f32], entry: usize, layer: usize) -> usize {
-        let mut current      = entry;
+        let mut current = entry;
         let mut current_dist = cosine_distance(query, &self.nodes[current].record.vector);
 
         loop {
             let mut improved = false;
-            let neighbours   = self.neighbours_at(current, layer);
+            let neighbours = self.neighbours_at(current, layer);
 
             for &nb in neighbours {
                 let d = cosine_distance(query, &self.nodes[nb].record.vector);
                 if d < current_dist {
-                    current      = nb;
+                    current = nb;
                     current_dist = d;
-                    improved     = true;
+                    improved = true;
                 }
             }
 
@@ -248,21 +245,21 @@ impl SemanticIndex {
 
     /// Beam search returning up to `ef` candidates at `layer`, ordered by
     /// distance ascending.
-    fn search_layer(
-        &self,
-        query:  &[f32],
-        entry:  usize,
-        ef:     usize,
-        layer:  usize,
-    ) -> Vec<Candidate> {
+    fn search_layer(&self, query: &[f32], entry: usize, ef: usize, layer: usize) -> Vec<Candidate> {
         let entry_dist = cosine_distance(query, &self.nodes[entry].record.vector);
 
-        let mut candidates:  BinaryHeap<Candidate> = BinaryHeap::new();
-        let mut results:     BinaryHeap<std::cmp::Reverse<Candidate>> = BinaryHeap::new();
-        let mut visited:     HashSet<usize> = HashSet::new();
+        let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
+        let mut results: BinaryHeap<std::cmp::Reverse<Candidate>> = BinaryHeap::new();
+        let mut visited: HashSet<usize> = HashSet::new();
 
-        candidates.push(Candidate { dist: entry_dist, index: entry });
-        results.push(std::cmp::Reverse(Candidate { dist: entry_dist, index: entry }));
+        candidates.push(Candidate {
+            dist: entry_dist,
+            index: entry,
+        });
+        results.push(std::cmp::Reverse(Candidate {
+            dist: entry_dist,
+            index: entry,
+        }));
         visited.insert(entry);
 
         while let Some(current) = candidates.pop() {
@@ -291,7 +288,11 @@ impl SemanticIndex {
         }
 
         let mut out: Vec<Candidate> = results.into_iter().map(|r| r.0).collect();
-        out.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(std::cmp::Ordering::Equal));
+        out.sort_by(|a, b| {
+            a.dist
+                .partial_cmp(&b.dist)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         out
     }
 
@@ -306,7 +307,7 @@ impl SemanticIndex {
 
     fn prune_neighbours(&mut self, index: usize, layer: usize) {
         let query: Vec<f32> = self.nodes[index].record.vector.clone();
-        let max             = self.config.m * 2;
+        let max = self.config.m * 2;
 
         let mut scored: Vec<(f32, usize)> = self.nodes[index].neighbours[layer]
             .iter()
@@ -331,7 +332,7 @@ impl SemanticIndex {
 
 /// Cosine distance in [0, 2] (0 = identical, 2 = opposite).
 fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    let dot:   f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let mag_a: f32 = a.iter().map(|v| v * v).sum::<f32>().sqrt();
     let mag_b: f32 = b.iter().map(|v| v * v).sum::<f32>().sqrt();
     if mag_a == 0.0 || mag_b == 0.0 {
@@ -400,14 +401,15 @@ mod tests {
     #[test]
     fn nearest_neighbour_correct() {
         let mut idx = SemanticIndex::new(HnswConfig {
-            m:            4,
+            m: 4,
             ef_construct: 20,
-            ef_search:    10,
+            ef_search: 10,
         });
 
         // Insert 8 orthogonal unit vectors.
         for i in 0..8u64 {
-            idx.insert(DocumentId::new(i), &unit(8, i as usize)).unwrap();
+            idx.insert(DocumentId::new(i), &unit(8, i as usize))
+                .unwrap();
         }
 
         // Query with unit vector 3 — nearest neighbour must be doc 3.
@@ -419,7 +421,8 @@ mod tests {
     fn search_returns_k_results() {
         let mut idx = SemanticIndex::new(HnswConfig::default());
         for i in 0..10u64 {
-            idx.insert(DocumentId::new(i), &unit(16, i as usize % 16)).unwrap();
+            idx.insert(DocumentId::new(i), &unit(16, i as usize % 16))
+                .unwrap();
         }
         let results = idx.search(&unit(16, 0), 5).unwrap();
         assert!(results.len() <= 5);

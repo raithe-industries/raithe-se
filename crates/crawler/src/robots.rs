@@ -10,7 +10,6 @@ use moka::sync::Cache;
 use raithe_common::Url;
 use raithe_scraper::Scraper;
 
-
 /// Maximum robots.txt entries held in the LRU cache.
 const MAX_ENTRIES: u64 = 10_000;
 
@@ -24,14 +23,14 @@ const TTL: Duration = Duration::from_secs(3_600); // 1 hour
 /// stores an implicit allow-all policy — crawling continues conservatively.
 pub struct RobotsCache {
     /// Cached robots.txt content, keyed by "scheme://host".
-    cache:      Cache<String, Vec<RobotsRule>>,
+    cache: Cache<String, Vec<RobotsRule>>,
     user_agent: String,
 }
 
 /// A single Allow/Disallow rule parsed from robots.txt.
 #[derive(Clone, Debug)]
 struct RobotsRule {
-    allow:  bool,
+    allow: bool,
     prefix: String,
 }
 
@@ -60,9 +59,8 @@ impl RobotsCache {
             // context, but moka's get_with init closure is sync; we block via
             // tokio::task::block_in_place).
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    fetch_rules(&origin, scraper).await
-                })
+                tokio::runtime::Handle::current()
+                    .block_on(async { fetch_rules(&origin, scraper).await })
             })
         });
 
@@ -74,8 +72,10 @@ impl RobotsCache {
 
 fn origin_key(url: &Url) -> String {
     let scheme = url.scheme();
-    let host   = url.host_str().unwrap_or("");
-    let port   = url.inner().port()
+    let host = url.host_str().unwrap_or("");
+    let port = url
+        .inner()
+        .port()
         .map(|p| format!(":{p}"))
         .unwrap_or_default();
     format!("{scheme}://{host}{port}")
@@ -85,17 +85,17 @@ fn origin_key(url: &Url) -> String {
 /// Returns empty vec (allow-all) on any error.
 async fn fetch_rules(origin: &str, scraper: &Scraper) -> Vec<RobotsRule> {
     let robots_url = match Url::parse(&format!("{origin}/robots.txt")) {
-        Ok(u)  => u,
+        Ok(u) => u,
         Err(_) => return Vec::new(),
     };
 
     let result = match scraper.fetch(&robots_url).await {
         Ok(r) if r.status == 200 => r,
-        _                        => return Vec::new(),
+        _ => return Vec::new(),
     };
 
     let text = match std::str::from_utf8(&result.body_bytes) {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(_) => return Vec::new(),
     };
 
@@ -132,7 +132,10 @@ fn parse_rules(text: &str) -> Vec<RobotsRule> {
 
         if let Some(rest) = line.strip_prefix("Disallow:") {
             let prefix = rest.trim().to_owned();
-            let rule   = RobotsRule { allow: false, prefix };
+            let rule = RobotsRule {
+                allow: false,
+                prefix,
+            };
             if current_wildcard {
                 wildcard.push(rule);
             } else {
@@ -143,7 +146,10 @@ fn parse_rules(text: &str) -> Vec<RobotsRule> {
 
         if let Some(rest) = line.strip_prefix("Allow:") {
             let prefix = rest.trim().to_owned();
-            let rule   = RobotsRule { allow: true, prefix };
+            let rule = RobotsRule {
+                allow: true,
+                prefix,
+            };
             if current_wildcard {
                 wildcard.push(rule);
             } else {
@@ -172,12 +178,12 @@ fn applies(rules: &[RobotsRule], path: &str, _user_agent: &str) -> bool {
     let mut best: Option<(usize, bool)> = None; // (prefix_len, allow)
 
     for rule in rules {
-        if rule.prefix.is_empty() { continue; }
+        if rule.prefix.is_empty() {
+            continue;
+        }
         if path.starts_with(&rule.prefix) {
             let len = rule.prefix.len();
-            let better = best
-                .map(|(best_len, _)| len > best_len)
-                .unwrap_or(true);
+            let better = best.map(|(best_len, _)| len > best_len).unwrap_or(true);
             if better {
                 best = Some((len, rule.allow));
             }
@@ -192,7 +198,10 @@ mod tests {
     use super::*;
 
     fn rule(allow: bool, prefix: &str) -> RobotsRule {
-        RobotsRule { allow, prefix: prefix.to_owned() }
+        RobotsRule {
+            allow,
+            prefix: prefix.to_owned(),
+        }
     }
 
     #[test]
@@ -208,12 +217,9 @@ mod tests {
 
     #[test]
     fn allow_overrides_disallow_with_longer_prefix() {
-        let rules = vec![
-            rule(false, "/private"),
-            rule(true,  "/private/public"),
-        ];
-        assert!(!applies(&rules, "/private/secret",  "bot"));
-        assert!(applies(&rules,  "/private/public/x","bot"));
+        let rules = vec![rule(false, "/private"), rule(true, "/private/public")];
+        assert!(!applies(&rules, "/private/secret", "bot"));
+        assert!(applies(&rules, "/private/public/x", "bot"));
     }
 
     #[test]

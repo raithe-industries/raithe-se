@@ -31,8 +31,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// batches and search results.
 #[derive(Clone, Debug)]
 pub struct Tombstone {
-    pub id:         DocumentId,
-    pub url:        Url,
+    pub id: DocumentId,
+    pub url: Url,
     pub deleted_at: Timestamp,
 }
 
@@ -43,14 +43,14 @@ pub struct Tombstone {
 /// Backed by a `VecDeque` behind a `Mutex`. Tombstoned URLs are filtered
 /// at enqueue time and at `next_batch` time.
 struct RecrawlQueue {
-    inner:      Mutex<VecDeque<(DocumentId, Url)>>,
+    inner: Mutex<VecDeque<(DocumentId, Url)>>,
     tombstones: Mutex<HashSet<DocumentId>>,
 }
 
 impl RecrawlQueue {
     fn new() -> Self {
         Self {
-            inner:      Mutex::new(VecDeque::new()),
+            inner: Mutex::new(VecDeque::new()),
             tombstones: Mutex::new(HashSet::new()),
         }
     }
@@ -77,10 +77,10 @@ impl RecrawlQueue {
     /// Drains up to `n` non-tombstoned URLs from the front of the queue.
     fn drain(&self, n: usize) -> Vec<Url> {
         let tombstones = self.tombstones.lock().unwrap_or_else(|p| p.into_inner());
-        let mut queue  = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut queue = self.inner.lock().unwrap_or_else(|p| p.into_inner());
 
         let mut batch = Vec::with_capacity(n);
-        let mut rest  = VecDeque::new();
+        let mut rest = VecDeque::new();
 
         while let Some((id, url)) = queue.pop_front() {
             if batch.len() >= n {
@@ -112,12 +112,12 @@ impl RecrawlQueue {
 pub struct FreshnessManager {
     /// Mapping from DocumentId to the URL and the timestamp when it was last
     /// successfully fetched.
-    doc_index:       Mutex<HashMap<DocumentId, (Url, Timestamp)>>,
-    recrawl_queue:   RecrawlQueue,
+    doc_index: Mutex<HashMap<DocumentId, (Url, Timestamp)>>,
+    recrawl_queue: RecrawlQueue,
     /// Tombstone records keyed by DocumentId.
-    tombstone_log:   Mutex<HashMap<DocumentId, Tombstone>>,
+    tombstone_log: Mutex<HashMap<DocumentId, Tombstone>>,
     /// Minimum age in milliseconds before a document is considered stale.
-    stale_after_ms:  i64,
+    stale_after_ms: i64,
 }
 
 impl FreshnessManager {
@@ -127,9 +127,9 @@ impl FreshnessManager {
     /// eligible for re-crawl. A reasonable default is 86_400_000 (24 hours).
     pub fn new(stale_after_ms: i64) -> Self {
         Self {
-            doc_index:      Mutex::new(HashMap::new()),
-            recrawl_queue:  RecrawlQueue::new(),
-            tombstone_log:  Mutex::new(HashMap::new()),
+            doc_index: Mutex::new(HashMap::new()),
+            recrawl_queue: RecrawlQueue::new(),
+            tombstone_log: Mutex::new(HashMap::new()),
             stale_after_ms,
         }
     }
@@ -162,8 +162,12 @@ impl FreshnessManager {
     pub fn tombstone(&self, id: DocumentId, url: Url) -> Result<()> {
         self.recrawl_queue.tombstone(id);
         let deleted_at = unix_ms_now();
-        let tombstone  = Tombstone { id, url, deleted_at };
-        let mut log    = self.tombstone_log.lock().unwrap_or_else(|p| p.into_inner());
+        let tombstone = Tombstone {
+            id,
+            url,
+            deleted_at,
+        };
+        let mut log = self.tombstone_log.lock().unwrap_or_else(|p| p.into_inner());
         log.insert(id, tombstone);
         Ok(())
     }
@@ -209,7 +213,6 @@ impl FreshnessManager {
         log.get(&id).cloned()
     }
 }
-
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

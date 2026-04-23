@@ -33,34 +33,38 @@ struct Cli {
     /// Path to the config file. Defaults to `data/config/engine.toml`.
     config_path: PathBuf,
     /// Emit JSON-format tracing logs when true.
-    json_logs:   bool,
+    json_logs: bool,
     /// Path to the seed URL list (one URL per line).
-    seeds_path:  Option<PathBuf>,
+    seeds_path: Option<PathBuf>,
 }
 
 impl Cli {
     fn parse() -> Self {
         let mut args = std::env::args().skip(1).peekable();
         let mut config_path = PathBuf::from("data/config/engine.toml");
-        let mut json_logs   = false;
-        let mut seeds_path  = None;
+        let mut json_logs = false;
+        let mut seeds_path = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--json-logs"  => json_logs = true,
-                "--seeds"      => {
+                "--json-logs" => json_logs = true,
+                "--seeds" => {
                     seeds_path = args.next().map(PathBuf::from);
                 }
-                "--config"     => {
+                "--config" => {
                     if let Some(p) = args.next() {
                         config_path = PathBuf::from(p);
                     }
                 }
-                _              => {}
+                _ => {}
             }
         }
 
-        Self { config_path, json_logs, seeds_path }
+        Self {
+            config_path,
+            json_logs,
+            seeds_path,
+        }
     }
 }
 
@@ -76,17 +80,13 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading config from {}", cli.config_path.display()))?;
 
     // Step 4 — initialise tracing subscriber.
-    raithe_metrics::init_tracing(cli.json_logs)
-        .context("initialising tracing subscriber")?;
+    raithe_metrics::init_tracing(cli.json_logs).context("initialising tracing subscriber")?;
 
     // Step 5 — initialise Metrics registry.
-    let metrics = Arc::new(
-        Metrics::new().context("initialising Prometheus metrics registry")?
-    );
+    let metrics = Arc::new(Metrics::new().context("initialising Prometheus metrics registry")?);
 
     // Step 6 — validate seed list (fail if < 100 valid seeds).
-    let seeds = load_seeds(cli.seeds_path.as_deref(), &config)
-        .context("loading seed URL list")?;
+    let seeds = load_seeds(cli.seeds_path.as_deref(), &config).context("loading seed URL list")?;
 
     if seeds.len() < config.crawler.min_seeds {
         anyhow::bail!(
@@ -99,15 +99,10 @@ async fn main() -> Result<()> {
 
     tracing::info!("startup [7/22] storage");
     // Step 7 — initialise Storage.
-    let data_dir   = PathBuf::from("data");
-    let crawl_log  = Arc::new(
-        CrawlLog::open(&data_dir.join("crawl.log"))
-            .context("opening crawl log")?
-    );
-    let doc_store  = Arc::new(
-        DocStore::open(&data_dir.join("docs"))
-            .context("opening doc store")?
-    );
+    let data_dir = PathBuf::from("data");
+    let crawl_log =
+        Arc::new(CrawlLog::open(&data_dir.join("crawl.log")).context("opening crawl log")?);
+    let doc_store = Arc::new(DocStore::open(&data_dir.join("docs")).context("opening doc store")?);
     let _ = doc_store; // wired into indexing pipeline at app layer
 
     tracing::info!("startup [8/22] neural engine — loading ONNX models, may take 30-120s on CPU");
@@ -119,7 +114,7 @@ async fn main() -> Result<()> {
     let neural_for_query = NeuralEngine::new(&config.neural, Arc::clone(&metrics))
         .context("initialising NeuralEngine for query processor (run install_models.sh)")?;
     tracing::info!("startup [8/22] neural engine — loading ranker instance");
-    let neural_for_rank  = NeuralEngine::new(&config.neural, Arc::clone(&metrics))
+    let neural_for_rank = NeuralEngine::new(&config.neural, Arc::clone(&metrics))
         .context("initialising NeuralEngine for ranker")?;
     tracing::info!("startup [8/22] neural engine — loading indexer instance");
     let neural_for_index = NeuralEngine::new(&config.neural, Arc::clone(&metrics))
@@ -127,13 +122,17 @@ async fn main() -> Result<()> {
 
     tracing::info!("startup [9/22] semantic index");
     // Step 9 — initialise SemanticIndex.
-    let semantic   = Arc::new(Mutex::new(SemanticIndex::new(HnswConfig::default())));
+    let semantic = Arc::new(Mutex::new(SemanticIndex::new(HnswConfig::default())));
 
     tracing::info!("startup [10/22] tantivy indexer");
     // Step 10 — initialise Indexer.
     let indexer = Arc::new(
-        Indexer::new(&data_dir.join("index"), &config.indexer, Arc::clone(&metrics))
-            .context("initialising Tantivy indexer")?
+        Indexer::new(
+            &data_dir.join("index"),
+            &config.indexer,
+            Arc::clone(&metrics),
+        )
+        .context("initialising Tantivy indexer")?,
     );
 
     tracing::info!("startup [11/22] link graph");
@@ -142,15 +141,13 @@ async fn main() -> Result<()> {
 
     tracing::info!("startup [12/22] query processor");
     // Step 12 — initialise QueryProcessor.
-    let processor = Arc::new(
-        QueryProcessor::new(neural_for_query, Arc::clone(&metrics))
-    );
+    let processor = Arc::new(QueryProcessor::new(neural_for_query, Arc::clone(&metrics)));
 
     tracing::info!("startup [13/22] ranker");
     // Step 13 — initialise Ranker.
     let ranker = Arc::new(
         Ranker::new(config.ranker.clone(), neural_for_rank, Arc::clone(&metrics))
-            .context("initialising ranker — check gbdt_model_path is accessible")?
+            .context("initialising ranker — check gbdt_model_path is accessible")?,
     );
 
     tracing::info!("startup [14/22] instant engine");
@@ -163,8 +160,8 @@ async fn main() -> Result<()> {
 
     tracing::info!("startup [16/22] scraper + crawler");
     // Step 16 — initialise Scraper (needed by Crawler).
-    let scraper = Scraper::new(&config.scraper, Arc::clone(&metrics))
-        .context("initialising HTTP scraper")?;
+    let scraper =
+        Scraper::new(&config.scraper, Arc::clone(&metrics)).context("initialising HTTP scraper")?;
 
     // Step 16 — initialise Crawler.
     let crawler = Arc::new(
@@ -175,7 +172,7 @@ async fn main() -> Result<()> {
             Arc::clone(&crawl_log),
             Arc::clone(&metrics),
         )
-        .context("initialising crawler — check seed count and config")?
+        .context("initialising crawler — check seed count and config")?,
     );
 
     tracing::info!("startup [17/22] freshness manager");
@@ -203,8 +200,8 @@ async fn main() -> Result<()> {
 
         // Crawler task — fetches URLs and sends FetchResult on the channel.
         {
-            let crawler    = Arc::clone(&crawler);
-            let fetch_tx   = fetch_tx.clone();
+            let crawler = Arc::clone(&crawler);
+            let fetch_tx = fetch_tx.clone();
             tokio::spawn(async move {
                 if let Err(err) = crawler.run(fetch_tx).await {
                     tracing::error!("crawler error: {err}");
@@ -223,23 +220,27 @@ async fn main() -> Result<()> {
         //     ├─► LinkGraph::add_edge(src, dst) for each outlink
         //     └─► Crawler::enqueue_outlinks(outlinks, depth + 1)
         {
-            let crawler        = Arc::clone(&crawler);
-            let indexer        = Arc::clone(&indexer);
-            let semantic       = Arc::clone(&semantic);
-            let link_graph     = Arc::clone(&link_graph);
-            let max_depth      = config.crawler.max_depth;
-            let mut neural     = neural_for_index;
-            let parser         = Parser::new();
+            let crawler = Arc::clone(&crawler);
+            let indexer = Arc::clone(&indexer);
+            let semantic = Arc::clone(&semantic);
+            let link_graph = Arc::clone(&link_graph);
+            let max_depth = config.crawler.max_depth;
+            let mut neural = neural_for_index;
+            let parser = Parser::new();
 
             // URL → DocumentId resolver for link-graph edge construction.
             // Outlinks whose destinations are not yet indexed are parked in
             // `pending_outlinks` keyed by the unresolved URL. When that URL
             // is later crawled and indexed, the parked sources are drained
             // and wired via `LinkGraph::add_edge` (DEF-006).
-            let mut url_to_id: std::collections::HashMap<raithe_common::Url, raithe_common::DocumentId>
-                = std::collections::HashMap::new();
-            let mut pending_outlinks: std::collections::HashMap<raithe_common::Url, Vec<raithe_common::DocumentId>>
-                = std::collections::HashMap::new();
+            let mut url_to_id: std::collections::HashMap<
+                raithe_common::Url,
+                raithe_common::DocumentId,
+            > = std::collections::HashMap::new();
+            let mut pending_outlinks: std::collections::HashMap<
+                raithe_common::Url,
+                Vec<raithe_common::DocumentId>,
+            > = std::collections::HashMap::new();
             // Monotonic document-id counter. `DocumentId::ZERO` is the sentinel
             // for "unassigned" — the first real id is ONE. Overflow returns
             // `Error::DocIdExhausted` via `DocumentId::next` (§9.1).
@@ -250,7 +251,7 @@ async fn main() -> Result<()> {
                     let url = fetch_result.url.clone();
 
                     let mut doc = match parser.parse(fetch_result) {
-                        Ok(d)  => d,
+                        Ok(d) => d,
                         Err(e) => {
                             tracing::warn!(%url, error = %e, "parse failed — skipping");
                             continue;
@@ -260,7 +261,7 @@ async fn main() -> Result<()> {
                     match next_doc_id.next() {
                         Some(id) => {
                             next_doc_id = id;
-                            doc.id      = id;
+                            doc.id = id;
                         }
                         None => {
                             tracing::error!("document id space exhausted — halting indexing");
@@ -276,8 +277,7 @@ async fn main() -> Result<()> {
                     match neural.embed(&[body_ref]) {
                         Ok(embeddings) => {
                             if let Some(embedding) = embeddings.into_iter().next() {
-                                let mut sem = semantic.lock()
-                                    .unwrap_or_else(|p| p.into_inner());
+                                let mut sem = semantic.lock().unwrap_or_else(|p| p.into_inner());
                                 if let Err(e) = sem.insert(doc.id, &embedding) {
                                     tracing::warn!(%url, error = %e, "semantic insert failed");
                                 }
@@ -296,8 +296,7 @@ async fn main() -> Result<()> {
                     {
                         url_to_id.insert(doc.url.clone(), doc.id);
 
-                        let mut graph = link_graph.lock()
-                            .unwrap_or_else(|p| p.into_inner());
+                        let mut graph = link_graph.lock().unwrap_or_else(|p| p.into_inner());
 
                         if let Some(sources) = pending_outlinks.remove(&doc.url) {
                             for src_id in sources {
@@ -308,7 +307,7 @@ async fn main() -> Result<()> {
                         for outlink in &doc.outlinks {
                             match url_to_id.get(outlink).copied() {
                                 Some(dst_id) => graph.add_edge(doc.id, dst_id),
-                                None         => pending_outlinks
+                                None => pending_outlinks
                                     .entry(outlink.clone())
                                     .or_default()
                                     .push(doc.id),
@@ -328,7 +327,7 @@ async fn main() -> Result<()> {
     // Step 20 — spawn freshness task.
     {
         let freshness = Arc::clone(&freshness);
-        let crawler   = Arc::clone(&crawler);
+        let crawler = Arc::clone(&crawler);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
@@ -346,17 +345,20 @@ async fn main() -> Result<()> {
         });
     }
 
-    tracing::info!("startup [21/22] binding HTTP server on {}", config.serving.bind);
+    tracing::info!(
+        "startup [21/22] binding HTTP server on {}",
+        config.serving.bind
+    );
     // Step 21 — bind serving HTTP server — fail clearly on port conflict.
     let doc_count = indexer.doc_count().unwrap_or(0);
     let app_state = Arc::new(AppState {
-        config:    config.serving.clone(),
-        metrics:   Arc::clone(&metrics),
-        indexer:   Arc::clone(&indexer),
+        config: config.serving.clone(),
+        metrics: Arc::clone(&metrics),
+        indexer: Arc::clone(&indexer),
         processor: Arc::clone(&processor),
-        ranker:    Arc::clone(&ranker),
-        instant:   Arc::clone(&instant),
-        sessions:  Arc::clone(&sessions),
+        ranker: Arc::clone(&ranker),
+        instant: Arc::clone(&instant),
+        sessions: Arc::clone(&sessions),
     });
 
     let server = Server::new(config.serving.clone(), app_state)
@@ -382,11 +384,11 @@ async fn main() -> Result<()> {
 fn load_seeds(path: Option<&Path>, _config: &Config) -> Result<Vec<Url>> {
     let path = match path {
         Some(p) => p.to_path_buf(),
-        None    => PathBuf::from("data/seeds.txt"),
+        None => PathBuf::from("data/seeds.txt"),
     };
 
     let text = match std::fs::read_to_string(&path) {
-        Ok(t)  => t,
+        Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::warn!(
                 path = %path.display(),
@@ -402,7 +404,7 @@ fn load_seeds(path: Option<&Path>, _config: &Config) -> Result<Vec<Url>> {
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .filter_map(|l| match Url::parse(l) {
-            Ok(u)  => Some(u),
+            Ok(u) => Some(u),
             Err(_) => {
                 tracing::warn!(line = l, "invalid seed URL — skipping");
                 None

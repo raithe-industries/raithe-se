@@ -51,24 +51,23 @@ impl ExecutionProvider {
     /// Returns the Prometheus label string for the given provider.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Cuda     => "cuda",
+            Self::Cuda => "cuda",
             Self::DirectMl => "directml",
-            Self::CoreMl   => "coreml",
-            Self::Cpu      => "cpu",
+            Self::CoreMl => "coreml",
+            Self::Cpu => "cpu",
         }
     }
 }
 
 /// A loaded ONNX model handle with its associated vocabulary tokeniser.
 struct ModelHandle {
-    session:   Session,
+    session: Session,
     tokeniser: tokenizers::Tokenizer,
 }
 
 impl std::fmt::Debug for ModelHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ModelHandle")
-            .finish_non_exhaustive()
+        f.debug_struct("ModelHandle").finish_non_exhaustive()
     }
 }
 
@@ -78,12 +77,12 @@ impl std::fmt::Debug for ModelHandle {
 /// lifetime of the process. The active `ExecutionProvider` is selected by
 /// probing in priority order — first successful init wins.
 pub struct NeuralEngine {
-    embedder:           ModelHandle,
-    reranker:           ModelHandle,
-    generator:          ModelHandle,
-    provider:           ExecutionProvider,
-    generator_max_new:  usize,
-    metrics:            Arc<Metrics>,
+    embedder: ModelHandle,
+    reranker: ModelHandle,
+    generator: ModelHandle,
+    provider: ExecutionProvider,
+    generator_max_new: usize,
+    metrics: Arc<Metrics>,
 }
 
 impl NeuralEngine {
@@ -107,10 +106,12 @@ impl NeuralEngine {
         //
         // Validate the path is set so failure is diagnosed immediately.
         if config.ort_dylib_path.as_os_str().is_empty()
-            && std::env::var("ORT_DYLIB_PATH").unwrap_or_default().is_empty()
+            && std::env::var("ORT_DYLIB_PATH")
+                .unwrap_or_default()
+                .is_empty()
         {
             return Err(Error::OrtLoad {
-                path:   String::from("(none)"),
+                path: String::from("(none)"),
                 reason: String::from(
                     "ORT_DYLIB_PATH not set — launch via raithe.sh which \
                      locates and exports the ORT shared library automatically",
@@ -124,12 +125,12 @@ impl NeuralEngine {
         // hang past the budget) falls through to the next candidate. CPU is
         // the unconditional backstop.
         let embedder_model = config.embedder_dir.join("model.onnx");
-        let provider       = probe_best_provider(&embedder_model);
+        let provider = probe_best_provider(&embedder_model);
 
         record_provider_gauge(&metrics, provider);
 
-        let embedder  = load_model(&config.embedder_dir,  provider)?;
-        let reranker  = load_model(&config.reranker_dir,  provider)?;
+        let embedder = load_model(&config.embedder_dir, provider)?;
+        let reranker = load_model(&config.reranker_dir, provider)?;
         let generator = load_model(&config.generator_dir, provider)?;
 
         Ok(Self {
@@ -168,12 +169,8 @@ impl NeuralEngine {
             .map(|vec| {
                 if vec.len() != Embedding::DIM {
                     return Err(Error::Inference {
-                        model:  String::from("embedder"),
-                        reason: format!(
-                            "expected {} dims, got {}",
-                            Embedding::DIM,
-                            vec.len()
-                        ),
+                        model: String::from("embedder"),
+                        reason: format!("expected {} dims, got {}", Embedding::DIM, vec.len()),
                     });
                 }
                 Ok(Embedding::new(vec))
@@ -223,25 +220,26 @@ impl NeuralEngine {
     /// Correct for any Qwen2.5 ONNX export; a KV-cache optimisation is a
     /// later, purely internal improvement.
     pub fn generate(&mut self, prompt: &str) -> Result<String> {
-        let encoding = self.generator.tokeniser
+        let encoding = self
+            .generator
+            .tokeniser
             .encode(prompt, true)
             .map_err(|err| Error::Tokeniser {
-                path:   String::from("generator"),
+                path: String::from("generator"),
                 reason: err.to_string(),
             })?;
 
         let mut tokens: Vec<u32> = encoding.get_ids().to_vec();
         let prompt_len = tokens.len();
-        let eos_id     = self.generator.tokeniser
+        let eos_id = self
+            .generator
+            .tokeniser
             .token_to_id("<|endoftext|>")
             .or_else(|| self.generator.tokeniser.token_to_id("<|im_end|>"));
 
         let max_new = self.generator_max_new;
         for _ in 0..max_new {
-            let next = generator_step(
-                &mut self.generator.session,
-                &tokens,
-            )?;
+            let next = generator_step(&mut self.generator.session, &tokens)?;
             tokens.push(next);
             if Some(next) == eos_id {
                 break;
@@ -250,17 +248,17 @@ impl NeuralEngine {
 
         // Decode only the newly generated tail so the prompt is not echoed.
         let generated: &[u32] = tokens.get(prompt_len..).unwrap_or(&[]);
-        self.generator.tokeniser
+        self.generator
+            .tokeniser
             .decode(generated, true)
             .map_err(|err| Error::Inference {
-                model:  String::from("generator"),
+                model: String::from("generator"),
                 reason: err.to_string(),
             })
     }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
 
 /// Records the selected EP in the Prometheus gauge — selected = 1.0, others = 0.0.
 fn record_provider_gauge(metrics: &Metrics, provider: ExecutionProvider) {
@@ -279,7 +277,7 @@ fn record_provider_gauge(metrics: &Metrics, provider: ExecutionProvider) {
 /// Both `model.onnx` and `tokenizer.json` must be present in `dir`.
 /// Missing either returns `Error::ModelNotFound`.
 fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
-    let model_path     = dir.join("model.onnx");
+    let model_path = dir.join("model.onnx");
     let tokeniser_path = dir.join("tokenizer.json");
 
     if !model_path.exists() || !tokeniser_path.exists() {
@@ -292,23 +290,23 @@ fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
 
     let session = Session::builder()
         .map_err(|err| Error::OrtLoad {
-            path:   dir.display().to_string(),
+            path: dir.display().to_string(),
             reason: err.to_string(),
         })?
         .with_execution_providers(eps)
         .map_err(|err| Error::OrtLoad {
-            path:   dir.display().to_string(),
+            path: dir.display().to_string(),
             reason: err.to_string(),
         })?
         .commit_from_file(&model_path)
         .map_err(|err| Error::OrtLoad {
-            path:   model_path.display().to_string(),
+            path: model_path.display().to_string(),
             reason: err.to_string(),
         })?;
 
-    let tokeniser = tokenizers::Tokenizer::from_file(&tokeniser_path)
-        .map_err(|err| Error::Tokeniser {
-            path:   tokeniser_path.display().to_string(),
+    let tokeniser =
+        tokenizers::Tokenizer::from_file(&tokeniser_path).map_err(|err| Error::Tokeniser {
+            path: tokeniser_path.display().to_string(),
             reason: err.to_string(),
         })?;
 
@@ -319,7 +317,7 @@ fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
 /// provider, always terminated with CPU as the unconditional backstop.
 fn execution_providers_for(provider: ExecutionProvider) -> Vec<ExecutionProviderDispatch> {
     match provider {
-        ExecutionProvider::Cuda     => vec![
+        ExecutionProvider::Cuda => vec![
             CUDAExecutionProvider::default().build(),
             CPUExecutionProvider::default().build(),
         ],
@@ -327,13 +325,11 @@ fn execution_providers_for(provider: ExecutionProvider) -> Vec<ExecutionProvider
             DirectMLExecutionProvider::default().build(),
             CPUExecutionProvider::default().build(),
         ],
-        ExecutionProvider::CoreMl   => vec![
+        ExecutionProvider::CoreMl => vec![
             CoreMLExecutionProvider::default().build(),
             CPUExecutionProvider::default().build(),
         ],
-        ExecutionProvider::Cpu      => vec![
-            CPUExecutionProvider::default().build(),
-        ],
+        ExecutionProvider::Cpu => vec![CPUExecutionProvider::default().build()],
     }
 }
 
@@ -370,9 +366,9 @@ fn probe_best_provider(model_path: &Path) -> ExecutionProvider {
 /// within `budget`; `false` otherwise. Any panic, error, or timeout is
 /// treated as "unavailable."
 fn probe_provider(
-    candidate:  ExecutionProvider,
+    candidate: ExecutionProvider,
     model_path: &Path,
-    budget:     std::time::Duration,
+    budget: std::time::Duration,
 ) -> bool {
     if !model_path.exists() {
         return false;
@@ -383,7 +379,7 @@ fn probe_provider(
 
     std::thread::spawn(move || {
         let eps = execution_providers_for(candidate);
-        let ok  = probe_once(eps, &path).is_ok();
+        let ok = probe_once(eps, &path).is_ok();
         let _ = tx.send(ok);
     });
 
@@ -407,19 +403,21 @@ fn probe_provider(
 /// converts the error through `Display`, which has no thread-safety bounds.
 fn probe_once(eps: Vec<ExecutionProviderDispatch>, path: &Path) -> Result<Session> {
     let path_str = path.display().to_string();
-    let builder = Session::builder().map_err(|e| Error::OrtLoad {
-        path:   path_str.clone(),
-        reason: e.to_string(),
-    })?;
-    let builder = builder.with_execution_providers(eps).map_err(|e| Error::OrtLoad {
-        path:   path_str.clone(),
-        reason: e.to_string(),
-    })?;
-    let session = builder.commit_from_file(path).map_err(|e| Error::OrtLoad {
-        path:   path_str,
-        reason: e.to_string(),
-    })?;
-    Ok(session)
+    Session::builder()
+        .map_err(|e| Error::OrtLoad {
+            path: path_str.clone(),
+            reason: e.to_string(),
+        })?
+        .with_execution_providers(eps)
+        .map_err(|e| Error::OrtLoad {
+            path: path_str.clone(),
+            reason: e.to_string(),
+        })?
+        .commit_from_file(path)
+        .map_err(|e| Error::OrtLoad {
+            path: path_str,
+            reason: e.to_string(),
+        })
 }
 
 /// Tokenises `texts`, runs ONNX inference, and returns raw f32 output vectors.
@@ -435,21 +433,27 @@ fn run_session(
             tokeniser
                 .encode(*text, true)
                 .map_err(|err| Error::Tokeniser {
-                    path:   model.to_owned(),
+                    path: model.to_owned(),
                     reason: err.to_string(),
                 })
         })
         .collect::<Result<_>>()?;
 
-    let batch   = encodings.len();
-    let max_len = encodings.iter().map(|e| e.get_ids().len()).max().unwrap_or(0);
+    let batch = encodings.len();
+    let max_len = encodings
+        .iter()
+        .map(|e| e.get_ids().len())
+        .max()
+        .unwrap_or(0);
 
     let padded_ids: Vec<i64> = encodings
         .iter()
         .flat_map(|e| {
             let row = e.get_ids();
             let pad = max_len - row.len();
-            row.iter().map(|&id| id as i64).chain(std::iter::repeat(0i64).take(pad))
+            row.iter()
+                .map(|&id| id as i64)
+                .chain(std::iter::repeat(0i64).take(pad))
         })
         .collect();
 
@@ -458,20 +462,25 @@ fn run_session(
         .flat_map(|e| {
             let row = e.get_attention_mask();
             let pad = max_len - row.len();
-            row.iter().map(|&m| m as i64).chain(std::iter::repeat(0i64).take(pad))
+            row.iter()
+                .map(|&m| m as i64)
+                .chain(std::iter::repeat(0i64).take(pad))
         })
         .collect();
 
-    let ids_tensor = Tensor::<i64>::from_array(([batch, max_len], padded_ids))
-        .map_err(|err| Error::Inference {
-            model:  model.to_owned(),
+    let ids_tensor = Tensor::<i64>::from_array(([batch, max_len], padded_ids)).map_err(|err| {
+        Error::Inference {
+            model: model.to_owned(),
             reason: err.to_string(),
-        })?;
+        }
+    })?;
 
-    let mask_tensor = Tensor::<i64>::from_array(([batch, max_len], padded_masks))
-        .map_err(|err| Error::Inference {
-            model:  model.to_owned(),
-            reason: err.to_string(),
+    let mask_tensor =
+        Tensor::<i64>::from_array(([batch, max_len], padded_masks)).map_err(|err| {
+            Error::Inference {
+                model: model.to_owned(),
+                reason: err.to_string(),
+            }
         })?;
 
     let outputs = session
@@ -480,26 +489,28 @@ fn run_session(
             "attention_mask" => mask_tensor
         ])
         .map_err(|err| Error::Inference {
-            model:  model.to_owned(),
+            model: model.to_owned(),
             reason: err.to_string(),
         })?;
 
-    let output_value = outputs
-        .values()
-        .next()
-        .ok_or_else(|| Error::Inference {
-            model:  model.to_owned(),
-            reason: String::from("no output tensors returned"),
-        })?;
+    let output_value = outputs.values().next().ok_or_else(|| Error::Inference {
+        model: model.to_owned(),
+        reason: String::from("no output tensors returned"),
+    })?;
 
-    let (shape, slice) = output_value
-        .try_extract_tensor::<f32>()
-        .map_err(|err| Error::Inference {
-            model:  model.to_owned(),
-            reason: err.to_string(),
-        })?;
+    let (shape, slice) =
+        output_value
+            .try_extract_tensor::<f32>()
+            .map_err(|err| Error::Inference {
+                model: model.to_owned(),
+                reason: err.to_string(),
+            })?;
 
-    let cols = if shape.len() >= 2 { shape[1] as usize } else { slice.len() / batch };
+    let cols = if shape.len() >= 2 {
+        shape[1] as usize
+    } else {
+        slice.len() / batch
+    };
 
     let result = (0..batch)
         .map(|i| slice.iter().skip(i * cols).take(cols).copied().collect())
@@ -519,23 +530,23 @@ fn generator_step(session: &mut Session, tokens: &[u32]) -> Result<u32> {
     let seq = tokens.len();
     if seq == 0 {
         return Err(Error::Inference {
-            model:  String::from("generator"),
+            model: String::from("generator"),
             reason: String::from("cannot step on an empty token sequence"),
         });
     }
 
-    let ids:   Vec<i64> = tokens.iter().map(|&t| t as i64).collect();
+    let ids: Vec<i64> = tokens.iter().map(|&t| t as i64).collect();
     let masks: Vec<i64> = vec![1i64; seq];
 
-    let ids_tensor = Tensor::<i64>::from_array(([1usize, seq], ids))
-        .map_err(|err| Error::Inference {
-            model:  String::from("generator"),
+    let ids_tensor =
+        Tensor::<i64>::from_array(([1usize, seq], ids)).map_err(|err| Error::Inference {
+            model: String::from("generator"),
             reason: err.to_string(),
         })?;
 
-    let mask_tensor = Tensor::<i64>::from_array(([1usize, seq], masks))
-        .map_err(|err| Error::Inference {
-            model:  String::from("generator"),
+    let mask_tensor =
+        Tensor::<i64>::from_array(([1usize, seq], masks)).map_err(|err| Error::Inference {
+            model: String::from("generator"),
             reason: err.to_string(),
         })?;
 
@@ -545,51 +556,51 @@ fn generator_step(session: &mut Session, tokens: &[u32]) -> Result<u32> {
             "attention_mask" => mask_tensor
         ])
         .map_err(|err| Error::Inference {
-            model:  String::from("generator"),
+            model: String::from("generator"),
             reason: err.to_string(),
         })?;
 
-    let logits_value = outputs
-        .values()
-        .next()
-        .ok_or_else(|| Error::Inference {
-            model:  String::from("generator"),
-            reason: String::from("no output tensors returned"),
-        })?;
+    let logits_value = outputs.values().next().ok_or_else(|| Error::Inference {
+        model: String::from("generator"),
+        reason: String::from("no output tensors returned"),
+    })?;
 
-    let (shape, slice) = logits_value
-        .try_extract_tensor::<f32>()
-        .map_err(|err| Error::Inference {
-            model:  String::from("generator"),
-            reason: err.to_string(),
-        })?;
+    let (shape, slice) =
+        logits_value
+            .try_extract_tensor::<f32>()
+            .map_err(|err| Error::Inference {
+                model: String::from("generator"),
+                reason: err.to_string(),
+            })?;
 
     // Qwen2.5 causal-LM head emits logits of shape [batch=1, seq, vocab].
     // Argmax the final-step slice: logits[0, seq-1, :].
     if shape.len() != 3 {
         return Err(Error::Inference {
-            model:  String::from("generator"),
+            model: String::from("generator"),
             reason: format!("expected 3-D logits, got shape {shape:?}"),
         });
     }
     let step_seq = shape[1] as usize;
-    let vocab    = shape[2] as usize;
+    let vocab = shape[2] as usize;
     if step_seq == 0 || vocab == 0 {
         return Err(Error::Inference {
-            model:  String::from("generator"),
+            model: String::from("generator"),
             reason: format!("degenerate logits shape {shape:?}"),
         });
     }
 
     let last_start = (step_seq - 1) * vocab;
-    let last_end   = last_start + vocab;
-    let last_logits = slice.get(last_start..last_end).ok_or_else(|| Error::Inference {
-        model:  String::from("generator"),
-        reason: String::from("logits slice shorter than shape implies"),
-    })?;
+    let last_end = last_start + vocab;
+    let last_logits = slice
+        .get(last_start..last_end)
+        .ok_or_else(|| Error::Inference {
+            model: String::from("generator"),
+            reason: String::from("logits slice shorter than shape implies"),
+        })?;
 
     let next = argmax_u32(last_logits).ok_or_else(|| Error::Inference {
-        model:  String::from("generator"),
+        model: String::from("generator"),
         reason: String::from("empty final-step logits"),
     })?;
 
@@ -599,13 +610,13 @@ fn generator_step(session: &mut Session, tokens: &[u32]) -> Result<u32> {
 /// Returns the index of the maximum value in `values`, or `None` when empty.
 fn argmax_u32(values: &[f32]) -> Option<u32> {
     let mut best_idx: usize = 0;
-    let mut best_val: f32   = f32::NEG_INFINITY;
-    let mut seen            = false;
+    let mut best_val: f32 = f32::NEG_INFINITY;
+    let mut seen = false;
     for (i, &v) in values.iter().enumerate() {
         if !seen || v > best_val {
             best_idx = i;
             best_val = v;
-            seen     = true;
+            seen = true;
         }
     }
     seen.then_some(best_idx as u32)
@@ -617,10 +628,10 @@ mod tests {
 
     #[test]
     fn execution_provider_labels_are_correct() {
-        assert_eq!(ExecutionProvider::Cuda.label(),     "cuda");
+        assert_eq!(ExecutionProvider::Cuda.label(), "cuda");
         assert_eq!(ExecutionProvider::DirectMl.label(), "directml");
-        assert_eq!(ExecutionProvider::CoreMl.label(),   "coreml");
-        assert_eq!(ExecutionProvider::Cpu.label(),      "cpu");
+        assert_eq!(ExecutionProvider::CoreMl.label(), "coreml");
+        assert_eq!(ExecutionProvider::Cpu.label(), "cpu");
     }
 
     #[test]

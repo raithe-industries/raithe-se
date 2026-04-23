@@ -19,8 +19,7 @@ fn make_metrics() -> Arc<Metrics> {
 
 // Representative passage text for embedding; length approximates a typical
 // body_text snippet passed from the indexing pipeline.
-const PASSAGE: &str =
-    "Rust is a systems programming language that runs blazingly fast, prevents \
+const PASSAGE: &str = "Rust is a systems programming language that runs blazingly fast, prevents \
      segfaults, and guarantees thread safety. Its ownership model eliminates \
      entire classes of bugs at compile time without a garbage collector.";
 
@@ -41,18 +40,14 @@ fn bench_embed_latency(c: &mut Criterion) {
     for batch in [1usize, 4, 8, 16, 32] {
         group.throughput(Throughput::Elements(batch as u64));
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(batch),
-            &batch,
-            |b, &batch| {
-                let texts: Vec<&str> = (0..batch).map(|_| PASSAGE).collect();
-                b.iter(|| {
-                    engine
-                        .embed(&texts)
-                        .expect("internal error: embed failed in bench")
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(batch), &batch, |b, &batch| {
+            let texts: Vec<&str> = (0..batch).map(|_| PASSAGE).collect();
+            b.iter(|| {
+                engine
+                    .embed(&texts)
+                    .expect("internal error: embed failed in bench")
+            });
+        });
     }
 
     group.finish();

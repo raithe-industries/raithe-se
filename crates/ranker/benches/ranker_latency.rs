@@ -22,8 +22,8 @@ fn make_metrics() -> Arc<Metrics> {
 
 fn make_hit(id: u64, score: f32) -> RawHit {
     RawHit {
-        id:      DocumentId::new(id),
-        url:     Url::parse("https://example.com/").expect("internal error: bench URL"),
+        id: DocumentId::new(id),
+        url: Url::parse("https://example.com/").expect("internal error: bench URL"),
         score,
         snippet: String::from(
             "Rust is a systems programming language focused on safety, speed, and concurrency.",
@@ -48,27 +48,23 @@ fn bench_rank_latency(c: &mut Criterion) {
     group.sampling_mode(criterion::SamplingMode::Flat);
     group.sample_size(50);
 
-    let metrics  = make_metrics();
-    let neural   = NeuralEngine::new(&NeuralConfig::default(), Arc::clone(&metrics))
+    let metrics = make_metrics();
+    let neural = NeuralEngine::new(&NeuralConfig::default(), Arc::clone(&metrics))
         .expect("internal error: NeuralEngine init failed — models must be present");
-    let ranker   = Ranker::new(RankerConfig::default(), neural, Arc::clone(&metrics))
+    let ranker = Ranker::new(RankerConfig::default(), neural, Arc::clone(&metrics))
         .expect("internal error: Ranker init failed");
-    let query    = ParsedQuery::raw("rust systems programming");
+    let query = ParsedQuery::raw("rust systems programming");
     let pageranks = PageRankScores::new();
 
     for n in [10usize, 32, 100] {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &n,
-            |b, &n| {
-                b.iter(|| {
-                    let hits = make_hits(n);
-                    ranker
-                        .rank(hits, &query, &pageranks)
-                        .expect("internal error: ranker rank failed in bench")
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+            b.iter(|| {
+                let hits = make_hits(n);
+                ranker
+                    .rank(hits, &query, &pageranks)
+                    .expect("internal error: ranker rank failed in bench")
+            });
+        });
     }
 
     group.finish();

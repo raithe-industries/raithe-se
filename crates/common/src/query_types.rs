@@ -25,13 +25,13 @@ pub enum QueryIntent {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ParsedQuery {
     /// The raw query string as submitted by the user.
-    pub original:  String,
+    pub original: String,
     /// Normalised tokens after stemming and stop-word removal.
-    pub tokens:    Vec<String>,
+    pub tokens: Vec<String>,
     /// Classified intent of the query.
-    pub intent:    QueryIntent,
+    pub intent: QueryIntent,
     /// Synonym expansions for each token.
-    pub synonyms:  Vec<Vec<String>>,
+    pub synonyms: Vec<Vec<String>>,
     /// LLM-rewritten query for improved recall; equals `original` when
     /// rewriting is disabled or unavailable.
     pub rewritten: String,
@@ -48,8 +48,8 @@ impl ParsedQuery {
         let rewritten = original.clone();
         Self {
             original,
-            tokens:   Vec::new(),
-            intent:   QueryIntent::default(),
+            tokens: Vec::new(),
+            intent: QueryIntent::default(),
             synonyms: Vec::new(),
             rewritten,
         }
@@ -63,13 +63,13 @@ impl ParsedQuery {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RawHit {
     /// The matched document's identifier.
-    pub id:      DocumentId,
+    pub id: DocumentId,
     /// The document's URL (for snippet and result display).
-    pub url:     Url,
+    pub url: Url,
     /// BM25F score from Tantivy.
-    pub score:   f32,
+    pub score: f32,
     /// Extracted snippet of matching body text.
     pub snippet: String,
     /// Document title.
-    pub title:   String,
+    pub title: String,
 }

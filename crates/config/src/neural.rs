@@ -50,11 +50,11 @@ pub struct NeuralConfig {
 impl Default for NeuralConfig {
     fn default() -> Self {
         Self {
-            model_dir:            PathBuf::from("data/models"),
-            embedder_dir:         PathBuf::from("data/models/embedder"),
-            reranker_dir:         PathBuf::from("data/models/reranker"),
-            generator_dir:        PathBuf::from("data/models/generator"),
-            ort_dylib_path:       PathBuf::new(),
+            model_dir: PathBuf::from("data/models"),
+            embedder_dir: PathBuf::from("data/models/embedder"),
+            reranker_dir: PathBuf::from("data/models/reranker"),
+            generator_dir: PathBuf::from("data/models/generator"),
+            ort_dylib_path: PathBuf::new(),
             generator_max_tokens: 256,
         }
     }

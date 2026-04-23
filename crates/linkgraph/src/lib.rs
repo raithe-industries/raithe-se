@@ -20,9 +20,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug)]
 pub struct PageRankConfig {
     /// Damping factor (standard default 0.85).
-    pub damping:   f64,
+    pub damping: f64,
     /// Maximum iterations before returning the best estimate.
-    pub max_iter:  usize,
+    pub max_iter: usize,
     /// L1 convergence tolerance — stops when sum of absolute score changes
     /// falls below this threshold.
     pub tolerance: f64,
@@ -31,8 +31,8 @@ pub struct PageRankConfig {
 impl Default for PageRankConfig {
     fn default() -> Self {
         Self {
-            damping:   0.85,
-            max_iter:  100,
+            damping: 0.85,
+            max_iter: 100,
             tolerance: 1e-6,
         }
     }
@@ -48,27 +48,27 @@ pub type PageRankScores = HashMap<DocumentId, f32>;
 /// After `build`, further `add_edge` calls require another `build`.
 pub struct LinkGraph {
     /// Raw edge list accumulated before compression.
-    edges:      Vec<(DocumentId, DocumentId)>,
+    edges: Vec<(DocumentId, DocumentId)>,
     /// All unique nodes seen via `add_edge`.
-    nodes:      Vec<DocumentId>,
+    nodes: Vec<DocumentId>,
     node_index: HashMap<DocumentId, usize>,
 
     // CSR arrays populated by `build`.
     offsets: Vec<usize>,
     targets: Vec<usize>,
-    built:   bool,
+    built: bool,
 }
 
 impl LinkGraph {
     /// Creates an empty graph.
     pub fn new() -> Self {
         Self {
-            edges:      Vec::new(),
-            nodes:      Vec::new(),
+            edges: Vec::new(),
+            nodes: Vec::new(),
             node_index: HashMap::new(),
-            offsets:    Vec::new(),
-            targets:    Vec::new(),
-            built:      false,
+            offsets: Vec::new(),
+            targets: Vec::new(),
+            built: false,
         }
     }
 
@@ -123,7 +123,7 @@ impl LinkGraph {
 
         self.offsets = offsets;
         self.targets = targets;
-        self.built   = true;
+        self.built = true;
     }
 
     /// Runs iterative PageRank and returns a score per document.
@@ -139,7 +139,7 @@ impl LinkGraph {
             return PageRankScores::new();
         }
 
-        let init       = 1.0 / n as f64;
+        let init = 1.0 / n as f64;
         let mut scores = vec![init; n];
         let dangling_d = (1.0 - config.damping) / n as f64;
 
@@ -147,8 +147,8 @@ impl LinkGraph {
             let mut next = vec![dangling_d; n];
 
             for src in 0..n {
-                let start      = self.offsets[src];
-                let end        = self.offsets[src + 1];
+                let start = self.offsets[src];
+                let end = self.offsets[src + 1];
                 let out_degree = end - start;
 
                 if out_degree == 0 {

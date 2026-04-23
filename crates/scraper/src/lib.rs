@@ -39,11 +39,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub struct FetchResult {
     /// The final URL after any redirects.
-    pub url:        Url,
+    pub url: Url,
     /// HTTP response status code.
-    pub status:     u16,
+    pub status: u16,
     /// Response headers as lowercase name → value pairs.
-    pub headers:    HashMap<String, String>,
+    pub headers: HashMap<String, String>,
     /// Raw response body bytes (decompressed by reqwest).
     pub body_bytes: Vec<u8>,
     /// Wall-clock time at which the fetch completed.
@@ -55,9 +55,9 @@ pub struct FetchResult {
 /// Built once and shared across crawler tasks. The underlying `reqwest::Client`
 /// is cheaply cloneable and manages a connection pool internally.
 pub struct Scraper {
-    client:         reqwest::Client,
+    client: reqwest::Client,
     max_body_bytes: usize,
-    metrics:        Arc<Metrics>,
+    metrics: Arc<Metrics>,
 }
 
 impl Scraper {
@@ -113,10 +113,7 @@ impl Scraper {
 
         // Gate on content-type before buffering the body.
         if !is_accepted_content_type(&headers) {
-            let content_type = headers
-                .get("content-type")
-                .cloned()
-                .unwrap_or_default();
+            let content_type = headers.get("content-type").cloned().unwrap_or_default();
             return Err(Error::ContentTypeRejected {
                 url: url.to_string(),
                 content_type,
@@ -130,7 +127,7 @@ impl Scraper {
 
         if raw_bytes.len() > self.max_body_bytes {
             return Err(Error::BodyTooLarge {
-                url:   url.to_string(),
+                url: url.to_string(),
                 limit: self.max_body_bytes,
             });
         }
@@ -163,7 +160,7 @@ fn status_class(status: u16) -> &'static str {
         300..=399 => "3xx",
         400..=499 => "4xx",
         500..=599 => "5xx",
-        _         => "err",
+        _ => "err",
     }
 }
 

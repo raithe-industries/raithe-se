@@ -156,7 +156,7 @@ pub fn render_index() -> String {
 // ── Results page ──────────────────────────────────────────────────────────────
 
 pub fn render_results(
-    query:   &str,
+    query: &str,
     results: &[SearchResult],
     instant: Option<&InstantAnswerResponse>,
 ) -> String {
@@ -181,8 +181,8 @@ pub fn render_results(
         results
             .iter()
             .map(|r| {
-                let title   = html_escape(&r.title);
-                let url     = html_escape(&r.url);
+                let title = html_escape(&r.title);
+                let url = html_escape(&r.url);
                 let snippet = html_escape(&r.snippet);
                 format!(
                     r#"<div class="result">
@@ -196,7 +196,7 @@ pub fn render_results(
     };
 
     let count = results.len();
-    let q     = html_escape(query);
+    let q = html_escape(query);
 
     format!(
         r#"<!DOCTYPE html>
@@ -241,12 +241,12 @@ pub fn render_results(
 fn html_escape(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {
-            '&'  => "&amp;".chars().collect::<Vec<_>>(),
-            '<'  => "&lt;".chars().collect(),
-            '>'  => "&gt;".chars().collect(),
-            '"'  => "&quot;".chars().collect(),
+            '&' => "&amp;".chars().collect::<Vec<_>>(),
+            '<' => "&lt;".chars().collect(),
+            '>' => "&gt;".chars().collect(),
+            '"' => "&quot;".chars().collect(),
             '\'' => "&#39;".chars().collect(),
-            _    => vec![c],
+            _ => vec![c],
         })
         .collect()
 }
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn render_results_with_instant_answer() {
         let ia = InstantAnswerResponse {
-            kind:    String::from("Calculation"),
+            kind: String::from("Calculation"),
             display: String::from("42"),
         };
         let html = render_results("6 * 7", &[], Some(&ia));

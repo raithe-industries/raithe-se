@@ -22,11 +22,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tower_http::{
-    limit::RequestBodyLimitLayer,
-    timeout::TimeoutLayer,
-    trace::TraceLayer,
-};
+use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
 
 use raithe_common::RawHit;
 use raithe_config::ServingConfig;
@@ -43,7 +39,7 @@ use raithe_session::{SessionId, SessionStore};
 pub enum Error {
     #[error("failed to bind '{addr}': {source}")]
     Bind {
-        addr:   String,
+        addr: String,
         #[source]
         source: std::io::Error,
     },
@@ -61,13 +57,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Shared state injected into every request handler.
 pub struct AppState {
-    pub config:    ServingConfig,
-    pub metrics:   Arc<Metrics>,
-    pub indexer:   Arc<Indexer>,
+    pub config: ServingConfig,
+    pub metrics: Arc<Metrics>,
+    pub indexer: Arc<Indexer>,
     pub processor: Arc<QueryProcessor>,
-    pub ranker:    Arc<Ranker>,
-    pub instant:   Arc<InstantEngine>,
-    pub sessions:  Arc<SessionStore>,
+    pub ranker: Arc<Ranker>,
+    pub instant: Arc<InstantEngine>,
+    pub sessions: Arc<SessionStore>,
 }
 
 // ── Wire types ────────────────────────────────────────────────────────────────
@@ -75,7 +71,7 @@ pub struct AppState {
 /// Query parameters for `GET /search`.
 #[derive(Debug, Deserialize)]
 struct SearchParams {
-    q:          Option<String>,
+    q: Option<String>,
     /// Optional session cookie value.
     #[allow(dead_code)]
     session_id: Option<String>,
@@ -84,25 +80,25 @@ struct SearchParams {
 /// A single search result returned in the JSON response.
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
-    pub title:   String,
-    pub url:     String,
+    pub title: String,
+    pub url: String,
     pub snippet: String,
-    pub score:   f32,
+    pub score: f32,
 }
 
 /// Full JSON response for `GET /search`.
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
-    pub query:         String,
-    pub results:       Vec<SearchResult>,
-    pub instant:       Option<InstantAnswerResponse>,
+    pub query: String,
+    pub results: Vec<SearchResult>,
+    pub instant: Option<InstantAnswerResponse>,
     pub total_results: usize,
 }
 
 /// Serialisable form of an instant answer.
 #[derive(Debug, Serialize)]
 pub struct InstantAnswerResponse {
-    pub kind:    String,
+    pub kind: String,
     pub display: String,
 }
 
@@ -121,31 +117,36 @@ impl From<InstantAnswer> for InstantAnswerResponse {
 /// Axum HTTP server.
 pub struct Server {
     listener: TcpListener,
-    router:   Router,
+    router: Router,
 }
 
 impl Server {
     /// Constructs a new `Server`, binding the TCP listener immediately so
     /// port conflicts are reported at init time, not at `run` time.
     pub fn new(config: ServingConfig, state: Arc<AppState>) -> Result<Self> {
-        let addr     = config.bind.clone();
+        let addr = config.bind.clone();
         let listener = std::net::TcpListener::bind(&addr)
             .and_then(|l| {
                 l.set_nonblocking(true)?;
                 Ok(l)
             })
-            .map_err(|source| Error::Bind { addr: addr.clone(), source })?;
-        let listener = TcpListener::from_std(listener)
-            .map_err(|source| Error::Bind { addr: addr.clone(), source })?;
+            .map_err(|source| Error::Bind {
+                addr: addr.clone(),
+                source,
+            })?;
+        let listener = TcpListener::from_std(listener).map_err(|source| Error::Bind {
+            addr: addr.clone(),
+            source,
+        })?;
 
         let max_body = state.config.max_request_bytes;
-        let origins  = state.config.allowed_origins.clone();
+        let origins = state.config.allowed_origins.clone();
 
         let router = Router::new()
-            .route("/",       get(handle_index))
+            .route("/", get(handle_index))
             .route("/search", get(handle_search))
             .route("/health", get(handle_health))
-            .route("/metrics",get(handle_metrics))
+            .route("/metrics", get(handle_metrics))
             .with_state(state)
             .layer(middleware::from_fn(move |req, next| {
                 let origins = origins.clone();
@@ -172,9 +173,7 @@ async fn handle_health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-async fn handle_metrics(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn handle_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.metrics.render() {
         Ok(text) => (
             StatusCode::OK,
@@ -197,7 +196,7 @@ async fn handle_search(
 ) -> Response {
     let raw = match params.q.as_deref().filter(|s| !s.is_empty()) {
         Some(q) => q.to_owned(),
-        None    => {
+        None => {
             return Html(templates::render_index()).into_response();
         }
     };
@@ -214,7 +213,7 @@ async fn handle_search(
 
     // Query processing.
     let parsed = match state.processor.process(&raw) {
-        Ok(p)  => p,
+        Ok(p) => p,
         Err(err) => {
             tracing::warn!(%err, "query processor failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -226,7 +225,7 @@ async fn handle_search(
 
     // Phase 1 — Tantivy BM25F search via the indexer (DEF-004).
     let hits = match state.indexer.search(&parsed) {
-        Ok(h)  => h,
+        Ok(h) => h,
         Err(err) => {
             tracing::warn!(%err, "indexer search failed");
             Vec::<RawHit>::new()
@@ -236,7 +235,7 @@ async fn handle_search(
     // Phase 2 + 3 — three-phase ranking pipeline.
     let pageranks = raithe_linkgraph::PageRankScores::new();
     let ranked = match state.ranker.rank(hits, &parsed, &pageranks) {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(err) => {
             tracing::warn!(%err, "ranker failed");
             Vec::new()
@@ -246,15 +245,15 @@ async fn handle_search(
     let results: Vec<SearchResult> = ranked
         .into_iter()
         .map(|h| SearchResult {
-            title:   h.title,
-            url:     h.url.to_string(),
+            title: h.title,
+            url: h.url.to_string(),
             snippet: h.snippet,
-            score:   h.score,
+            score: h.score,
         })
         .collect();
 
     let instant_resp = instant.map(InstantAnswerResponse::from);
-    let html         = templates::render_results(&raw, &results, instant_resp.as_ref());
+    let html = templates::render_results(&raw, &results, instant_resp.as_ref());
     let mut response = Html(html).into_response();
 
     if mint_cookie {
@@ -278,7 +277,10 @@ async fn handle_search(
 ///   2. `Cookie: raithe_sid=<uuid>` — browser sessions.
 ///   3. Freshly minted `SessionId` — caller must set cookie on response.
 fn resolve_session_id(headers: &axum::http::HeaderMap) -> (SessionId, bool) {
-    if let Some(raw) = headers.get("x-raithe-session").and_then(|v| v.to_str().ok()) {
+    if let Some(raw) = headers
+        .get("x-raithe-session")
+        .and_then(|v| v.to_str().ok())
+    {
         if let Ok(sid) = SessionId::parse_str(raw.trim()) {
             return (sid, false);
         }
@@ -300,11 +302,7 @@ fn resolve_session_id(headers: &axum::http::HeaderMap) -> (SessionId, bool) {
 
 // ── Security header middleware ────────────────────────────────────────────────
 
-async fn security_headers(
-    req:     Request<Body>,
-    next:    Next,
-    origins: Vec<String>,
-) -> Response {
+async fn security_headers(req: Request<Body>, next: Next, origins: Vec<String>) -> Response {
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
 
@@ -329,10 +327,7 @@ async fn security_headers(
     );
 
     // X-Frame-Options.
-    headers.insert(
-        header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("DENY"),
-    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
 
     // CORS — only insert when at least one origin is configured.
     if !origins.is_empty() {
@@ -352,9 +347,9 @@ mod tests {
     #[test]
     fn search_response_serialises() {
         let resp = SearchResponse {
-            query:         String::from("test"),
-            results:       Vec::new(),
-            instant:       None,
+            query: String::from("test"),
+            results: Vec::new(),
+            instant: None,
             total_results: 0,
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -366,9 +361,9 @@ mod tests {
     fn instant_answer_response_from_instant_answer() {
         use raithe_instant::AnswerKind;
         let ia = InstantAnswer {
-            kind:    AnswerKind::Calculation,
+            kind: AnswerKind::Calculation,
             display: String::from("42"),
-            input:   String::from("6 * 7"),
+            input: String::from("6 * 7"),
         };
         let resp = InstantAnswerResponse::from(ia);
         assert_eq!(resp.display, "42");

@@ -25,19 +25,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct ParsedDocument {
     /// Assigned document identifier — callers must set this before indexing.
     /// Initialised to `DocumentId::ZERO` by `Parser::parse`.
-    pub id:           DocumentId,
+    pub id: DocumentId,
     /// Final URL of the document.
-    pub url:          Url,
+    pub url: Url,
     /// Content of the `<title>` element.
-    pub title:        String,
+    pub title: String,
     /// Content of the `<meta name="description">` element.
-    pub description:  String,
+    pub description: String,
     /// Text content of all `<h1>`–`<h3>` elements, in document order.
-    pub headings:     Vec<String>,
+    pub headings: Vec<String>,
     /// Boilerplate-stripped body text.
-    pub body_text:    String,
+    pub body_text: String,
     /// Outbound links extracted from `<a href>` attributes.
-    pub outlinks:     Vec<Url>,
+    pub outlinks: Vec<Url>,
     /// SimHash fingerprint of the body text for near-duplicate detection.
     pub content_hash: SimHash,
 }
@@ -66,11 +66,10 @@ impl Parser {
 
         let meta = extract_meta(&result.body_bytes);
 
-        let (body_text, outlinks) =
-            match extract_body_lol_html(&result.body_bytes, &result.url) {
-                Ok(pair) => pair,
-                Err(_) => extract_body_scraper(&result.body_bytes, &result.url),
-            };
+        let (body_text, outlinks) = match extract_body_lol_html(&result.body_bytes, &result.url) {
+            Ok(pair) => pair,
+            Err(_) => extract_body_scraper(&result.body_bytes, &result.url),
+        };
 
         let content_hash = SimHash::from_tokens(body_text.split_whitespace());
 
@@ -96,9 +95,9 @@ impl Default for Parser {
 // ── Metadata extraction (scraper crate — DOM traversal) ──────────────────────
 
 struct Meta {
-    title:       String,
+    title: String,
     description: String,
-    headings:    Vec<String>,
+    headings: Vec<String>,
 }
 
 fn extract_meta(bytes: &[u8]) -> Meta {
@@ -150,7 +149,7 @@ fn extract_body_lol_html(
 ) -> std::result::Result<(String, Vec<Url>), ()> {
     use lol_html::{element, DocumentContentHandlers, HtmlRewriter, Settings};
 
-    let mut body_parts   = Vec::<String>::new();
+    let mut body_parts = Vec::<String>::new();
     let mut outlink_strs = Vec::<String>::new();
 
     {
@@ -170,15 +169,13 @@ fn extract_body_lol_html(
                         Ok(())
                     }),
                 ],
-                document_content_handlers: vec![
-                    DocumentContentHandlers::default().text(|t| {
-                        let text = t.as_str().trim().to_owned();
-                        if !text.is_empty() {
-                            body_parts.push(text);
-                        }
-                        Ok(())
-                    }),
-                ],
+                document_content_handlers: vec![DocumentContentHandlers::default().text(|t| {
+                    let text = t.as_str().trim().to_owned();
+                    if !text.is_empty() {
+                        body_parts.push(text);
+                    }
+                    Ok(())
+                })],
                 ..Settings::default()
             },
             |_: &[u8]| {},
@@ -260,9 +257,9 @@ mod tests {
 
     fn make_result(html: &str, url: &str) -> FetchResult {
         FetchResult {
-            url:        Url::parse(url).unwrap(),
-            status:     200,
-            headers:    HashMap::new(),
+            url: Url::parse(url).unwrap(),
+            status: 200,
+            headers: HashMap::new(),
             body_bytes: html.as_bytes().to_vec(),
             fetched_at: Timestamp::from_millis(0),
         }
@@ -275,7 +272,9 @@ mod tests {
             <meta name="description" content="A great search engine.">
             </head><body><p>Some body text.</p></body></html>"#;
 
-        let doc = Parser::new().parse(make_result(html, "https://example.com/")).unwrap();
+        let doc = Parser::new()
+            .parse(make_result(html, "https://example.com/"))
+            .unwrap();
 
         assert_eq!(doc.title, "Hello RAiTHE");
         assert_eq!(doc.description, "A great search engine.");
@@ -288,7 +287,9 @@ mod tests {
             <h1>Main</h1><h2>Sub</h2><h3>Minor</h3><h4>Ignored</h4>
             </body></html>"#;
 
-        let doc = Parser::new().parse(make_result(html, "https://example.com/")).unwrap();
+        let doc = Parser::new()
+            .parse(make_result(html, "https://example.com/"))
+            .unwrap();
 
         assert!(doc.headings.contains(&"Main".to_owned()));
         assert!(doc.headings.contains(&"Sub".to_owned()));
@@ -305,7 +306,9 @@ mod tests {
             <a href="mailto:x@y.com">mail</a>
             </body></html>"#;
 
-        let doc = Parser::new().parse(make_result(html, "https://example.com/")).unwrap();
+        let doc = Parser::new()
+            .parse(make_result(html, "https://example.com/"))
+            .unwrap();
         let urls: Vec<_> = doc.outlinks.iter().map(|u| u.as_str()).collect();
 
         assert!(urls.iter().any(|u| u.contains("other.com/page")));
@@ -317,9 +320,9 @@ mod tests {
     #[test]
     fn empty_body_returns_error() {
         let result = FetchResult {
-            url:        Url::parse("https://example.com/").unwrap(),
-            status:     200,
-            headers:    HashMap::new(),
+            url: Url::parse("https://example.com/").unwrap(),
+            status: 200,
+            headers: HashMap::new(),
             body_bytes: vec![],
             fetched_at: Timestamp::from_millis(0),
         };

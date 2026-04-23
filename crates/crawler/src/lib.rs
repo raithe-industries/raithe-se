@@ -67,15 +67,15 @@ type HostLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddle
 ///
 /// Built once at startup and driven by `Crawler::run()`.
 pub struct Crawler {
-    config:    CrawlerConfig,
-    frontier:  Frontier,
-    robots:    RobotsCache,
+    config: CrawlerConfig,
+    frontier: Frontier,
+    robots: RobotsCache,
     /// Per-registered-domain governor rate limiters.
     /// Keyed by registered domain string (e.g. "example.com").
-    limiters:  Cache<String, Arc<HostLimiter>>,
-    scraper:   Scraper,
+    limiters: Cache<String, Arc<HostLimiter>>,
+    scraper: Scraper,
     crawl_log: Arc<CrawlLog>,
-    metrics:   Arc<Metrics>,
+    metrics: Arc<Metrics>,
 }
 
 impl Crawler {
@@ -84,11 +84,11 @@ impl Crawler {
     /// Fails with `Error::InsufficientSeeds` if fewer than
     /// `config.min_seeds` valid seed URLs are present in `seeds`.
     pub fn new(
-        config:    CrawlerConfig,
-        seeds:     Vec<Url>,
-        scraper:   Scraper,
+        config: CrawlerConfig,
+        seeds: Vec<Url>,
+        scraper: Scraper,
         crawl_log: Arc<CrawlLog>,
-        metrics:   Arc<Metrics>,
+        metrics: Arc<Metrics>,
     ) -> Result<Self> {
         if seeds.len() < config.min_seeds {
             return Err(Error::InsufficientSeeds {
@@ -98,7 +98,7 @@ impl Crawler {
         }
 
         let frontier = Frontier::new(&seeds).map_err(|reason| Error::Frontier { reason })?;
-        let robots   = RobotsCache::new(&config.user_agent);
+        let robots = RobotsCache::new(&config.user_agent);
         let limiters = Cache::builder()
             .max_capacity(65_536)
             .time_to_idle(Duration::from_secs(3_600))
@@ -132,10 +132,7 @@ impl Crawler {
 
         loop {
             if pages_fetched >= self.config.max_pages {
-                tracing::info!(
-                    pages_fetched,
-                    "max_pages reached — crawl complete"
-                );
+                tracing::info!(pages_fetched, "max_pages reached — crawl complete");
                 break;
             }
 
@@ -148,7 +145,7 @@ impl Crawler {
             };
 
             let depth = entry.depth;
-            let url   = entry.url;
+            let url = entry.url;
 
             // robots.txt check.
             if !self.robots.is_allowed(&url, &self.scraper).await {
@@ -158,23 +155,18 @@ impl Crawler {
 
             // Per-host rate limiting — queue, never drop.
             let limiter = self.limiter_for(&url);
-            let host    = url.registered_domain().unwrap_or_default().to_owned();
+            let host = url.registered_domain().unwrap_or_default().to_owned();
             {
                 // governor's `until_ready` is sync; wrap in spawn_blocking to
                 // avoid blocking the async executor.
                 let limiter = limiter.clone();
-                let host    = host.clone();
+                let host = host.clone();
                 let metrics = self.metrics.clone();
                 tokio::task::spawn_blocking(move || {
                     if let Err(not_until) = limiter.check() {
-                        metrics
-                            .rate_limited_total
-                            .with_label_values(&[&host])
-                            .inc();
+                        metrics.rate_limited_total.with_label_values(&[&host]).inc();
                         let clock = governor::clock::DefaultClock::default();
-                        let wait  = not_until.wait_time_from(
-                            governor::clock::Clock::now(&clock),
-                        );
+                        let wait = not_until.wait_time_from(governor::clock::Clock::now(&clock));
                         std::thread::sleep(wait);
                     }
                 })
@@ -186,7 +178,7 @@ impl Crawler {
 
             // Fetch.
             let fetch_result = match self.scraper.fetch(&url).await {
-                Ok(r)  => r,
+                Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(%url, error = %e, "fetch failed");
                     self.metrics
@@ -201,16 +193,16 @@ impl Crawler {
                 }
             };
 
-            let status       = fetch_result.status;
-            let fetched_at   = fetch_result.fetched_at;
-            let body_len     = fetch_result.body_bytes.len();
+            let status = fetch_result.status;
+            let fetched_at = fetch_result.fetched_at;
+            let body_len = fetch_result.body_bytes.len();
             let status_class = status_class(status);
 
             // Crawl log.
             {
                 let log_entry = raithe_storage::CrawlEntry {
-                    id:         raithe_common::DocumentId::ZERO,
-                    url:        url.clone(),
+                    id: raithe_common::DocumentId::ZERO,
+                    url: url.clone(),
                     status,
                     fetched_at,
                     body_bytes: body_len,
@@ -261,10 +253,7 @@ impl Crawler {
     /// `requests_per_sec` is saturating-cast to a `NonZeroU32` — zero or
     /// negative rates clamp to 1 req/sec to avoid division-by-zero.
     fn limiter_for(&self, url: &Url) -> Arc<HostLimiter> {
-        let domain = url
-            .registered_domain()
-            .unwrap_or("__unknown__")
-            .to_owned();
+        let domain = url.registered_domain().unwrap_or("__unknown__").to_owned();
 
         self.limiters.get_with(domain, || {
             let rps = self.config.requests_per_sec.max(1.0) as u32;
@@ -283,7 +272,7 @@ fn status_class(status: u16) -> &'static str {
         300..=399 => "3xx",
         400..=499 => "4xx",
         500..=599 => "5xx",
-        _         => "other",
+        _ => "other",
     }
 }
 

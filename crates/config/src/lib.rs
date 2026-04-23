@@ -30,7 +30,7 @@ pub enum Error {
     Load {
         path: String,
         #[source]
-        source: figment::Error,
+        source: Box<figment::Error>,
     },
     #[error("cannot watch config file: {source}")]
     Watch {
@@ -54,8 +54,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Config {
     pub crawler: CrawlerConfig,
     pub indexer: IndexerConfig,
-    pub neural:  NeuralConfig,
-    pub ranker:  RankerConfig,
+    pub neural: NeuralConfig,
+    pub ranker: RankerConfig,
     pub scraper: ScraperConfig,
     pub serving: ServingConfig,
 }
@@ -77,7 +77,7 @@ impl Config {
             .extract()
             .map_err(|source| Error::Load {
                 path: path_str,
-                source,
+                source: Box::new(source),
             })?;
         Ok(config)
     }

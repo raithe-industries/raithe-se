@@ -21,8 +21,8 @@ pub struct RankerConfig {
 impl Default for RankerConfig {
     fn default() -> Self {
         Self {
-            gbdt_trees:      300,
-            reranker_top_k:  32,
+            gbdt_trees: 300,
+            reranker_top_k: 32,
             gbdt_model_path: PathBuf::from("data/models/ranker/gbdt.model"),
         }
     }

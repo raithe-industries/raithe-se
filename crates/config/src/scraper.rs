@@ -20,11 +20,11 @@ pub struct ScraperConfig {
 impl Default for ScraperConfig {
     fn default() -> Self {
         Self {
-            user_agent:           String::from("raithe-se/1.0"),
-            timeout_secs:         30,
+            user_agent: String::from("raithe-se/1.0"),
+            timeout_secs: 30,
             connect_timeout_secs: 10,
-            max_redirects:        10,
-            max_body_bytes:       10 * 1024 * 1024, // 10 MiB
+            max_redirects: 10,
+            max_body_bytes: 10 * 1024 * 1024, // 10 MiB
         }
     }
 }

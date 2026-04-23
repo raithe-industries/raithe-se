@@ -31,7 +31,12 @@ impl Embedding {
     ///
     /// Returns 0.0 if either vector has zero magnitude.
     pub fn cosine_similarity(&self, other: &Self) -> f32 {
-        let dot: f32 = self.values.iter().zip(other.values.iter()).map(|(a, b)| a * b).sum();
+        let dot: f32 = self
+            .values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(a, b)| a * b)
+            .sum();
         let mag_a: f32 = self.values.iter().map(|v| v * v).sum::<f32>().sqrt();
         let mag_b: f32 = other.values.iter().map(|v| v * v).sum::<f32>().sqrt();
         if mag_a == 0.0 || mag_b == 0.0 {

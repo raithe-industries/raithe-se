@@ -20,11 +20,11 @@ pub struct CrawlerConfig {
 impl Default for CrawlerConfig {
     fn default() -> Self {
         Self {
-            max_depth:        6,
-            max_pages:        1_000_000,
+            max_depth: 6,
+            max_pages: 1_000_000,
             requests_per_sec: 2.0,
-            min_seeds:        100,
-            user_agent:       String::from("raithe-se/1.0"),
+            min_seeds: 100,
+            user_agent: String::from("raithe-se/1.0"),
         }
     }
 }

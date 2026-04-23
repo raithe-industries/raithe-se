@@ -9,18 +9,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Wraps a `u64`. Use `DocumentId::next` to advance the counter safely;
 /// overflow returns `None` rather than wrapping.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-    Deserialize,
-    Serialize,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub struct DocumentId(u64);
 
 impl DocumentId {

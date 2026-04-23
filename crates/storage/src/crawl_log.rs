@@ -17,9 +17,9 @@ use crate::{Error, Result};
 /// A single entry in the crawl log.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CrawlEntry {
-    pub id:         DocumentId,
-    pub url:        Url,
-    pub status:     u16,
+    pub id: DocumentId,
+    pub url: Url,
+    pub status: u16,
     pub fetched_at: Timestamp,
     /// Byte length of the response body before compression.
     pub body_bytes: usize,
@@ -30,8 +30,8 @@ pub struct CrawlEntry {
 /// Thread-safe: all appends acquire a `Mutex` over the file handle.
 /// The log file is created if it does not exist.
 pub struct CrawlLog {
-    path:   PathBuf,
-    file:   Mutex<File>,
+    path: PathBuf,
+    file: Mutex<File>,
 }
 
 impl CrawlLog {
@@ -55,20 +55,21 @@ impl CrawlLog {
     /// Returns `Error::Io` on write failure. The mutex is held only for the
     /// duration of the write — lock poisoning is handled explicitly.
     pub fn append(&self, entry: &CrawlEntry) -> Result<()> {
-        let mut line = serde_json::to_string(entry).map_err(|err| {
-            Error::Serialise {
-                reason: err.to_string(),
-            }
+        let mut line = serde_json::to_string(entry).map_err(|err| Error::Serialise {
+            reason: err.to_string(),
         })?;
         line.push('\n');
 
-        let mut guard = self.file.lock().unwrap_or_else(|poisoned| {
-            poisoned.into_inner()
-        });
-        guard.write_all(line.as_bytes()).map_err(|source| Error::Io {
-            path: self.path.display().to_string(),
-            source,
-        })?;
+        let mut guard = self
+            .file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .write_all(line.as_bytes())
+            .map_err(|source| Error::Io {
+                path: self.path.display().to_string(),
+                source,
+            })?;
         guard.flush().map_err(|source| Error::Io {
             path: self.path.display().to_string(),
             source,
@@ -87,9 +88,9 @@ mod tests {
         let log = CrawlLog::open(&path).unwrap();
 
         let entry = CrawlEntry {
-            id:         DocumentId::new(1),
-            url:        Url::parse("https://example.com/").unwrap(),
-            status:     200,
+            id: DocumentId::new(1),
+            url: Url::parse("https://example.com/").unwrap(),
+            status: 200,
             fetched_at: Timestamp::from_millis(0),
             body_bytes: 1024,
         };
@@ -108,9 +109,9 @@ mod tests {
 
         for i in 0..3u64 {
             let entry = CrawlEntry {
-                id:         DocumentId::new(i),
-                url:        Url::parse("https://example.com/").unwrap(),
-                status:     200,
+                id: DocumentId::new(i),
+                url: Url::parse("https://example.com/").unwrap(),
+                status: 200,
                 fetched_at: Timestamp::from_millis(i as i64),
                 body_bytes: 100,
             };

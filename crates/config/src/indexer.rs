@@ -16,7 +16,7 @@ impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
             writer_heap_mb: 1024,
-            max_doc_id:     u64::MAX - 1,
+            max_doc_id: u64::MAX - 1,
         }
     }
 }

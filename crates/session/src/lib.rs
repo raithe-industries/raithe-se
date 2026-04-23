@@ -59,9 +59,9 @@ impl std::fmt::Display for SessionId {
 /// Per-session state held in memory.
 #[derive(Clone, Debug)]
 pub struct Session {
-    pub id:        SessionId,
+    pub id: SessionId,
     /// Query strings submitted in this session, in chronological order.
-    pub queries:   Vec<String>,
+    pub queries: Vec<String>,
     /// Wall-clock time of the most recent query.
     pub last_seen: Timestamp,
     /// Whether the most recent query was detected as a reformulation of the
@@ -73,8 +73,8 @@ impl Session {
     fn new(id: SessionId) -> Self {
         Self {
             id,
-            queries:          Vec::new(),
-            last_seen:        Timestamp::EPOCH,
+            queries: Vec::new(),
+            last_seen: Timestamp::EPOCH,
             is_reformulation: false,
         }
     }
@@ -89,8 +89,7 @@ pub struct ReformulationDetector;
 impl ReformulationDetector {
     /// Returns `true` when `next` is a reformulation of `prev`.
     pub fn is_reformulation(prev: &str, next: &str) -> bool {
-        let prev_tokens: std::collections::HashSet<&str> =
-            prev.split_whitespace().collect();
+        let prev_tokens: std::collections::HashSet<&str> = prev.split_whitespace().collect();
         let next_tokens: Vec<&str> = next.split_whitespace().collect();
 
         if next_tokens.is_empty() || prev_tokens.is_empty() {
@@ -130,9 +129,7 @@ impl SessionStore {
 
     /// Returns the session for the given `id`, creating one if it does not exist.
     pub fn get_or_create(&self, id: &SessionId) -> Session {
-        self.cache
-            .get(id)
-            .unwrap_or_else(|| Session::new(*id))
+        self.cache.get(id).unwrap_or_else(|| Session::new(*id))
     }
 
     /// Records `query` in the session identified by `id`.
@@ -149,7 +146,7 @@ impl SessionStore {
             .unwrap_or(false);
 
         session.queries.push(query.to_owned());
-        session.last_seen       = now();
+        session.last_seen = now();
         session.is_reformulation = is_reformulation;
 
         self.cache.insert(*id, session);
@@ -183,8 +180,8 @@ mod tests {
     #[test]
     fn get_or_create_returns_new_session() {
         let store = SessionStore::new(100, 3600);
-        let id    = SessionId::new();
-        let s     = store.get_or_create(&id);
+        let id = SessionId::new();
+        let s = store.get_or_create(&id);
         assert_eq!(s.id, id);
         assert!(s.queries.is_empty());
     }
@@ -192,7 +189,7 @@ mod tests {
     #[test]
     fn record_query_appends() {
         let store = SessionStore::new(100, 3600);
-        let id    = SessionId::new();
+        let id = SessionId::new();
         store.record_query(&id, "rust search engine").unwrap();
         store.record_query(&id, "fast rust search").unwrap();
         let s = store.get_or_create(&id);
@@ -202,7 +199,7 @@ mod tests {
     #[test]
     fn reformulation_detected() {
         let store = SessionStore::new(100, 3600);
-        let id    = SessionId::new();
+        let id = SessionId::new();
         store.record_query(&id, "rust search engine").unwrap();
         store.record_query(&id, "rust search engine fast").unwrap();
         let s = store.get_or_create(&id);
@@ -212,7 +209,7 @@ mod tests {
     #[test]
     fn no_reformulation_on_first_query() {
         let store = SessionStore::new(100, 3600);
-        let id    = SessionId::new();
+        let id = SessionId::new();
         store.record_query(&id, "hello world").unwrap();
         let s = store.get_or_create(&id);
         assert!(!s.is_reformulation);
@@ -242,7 +239,7 @@ mod tests {
 
     #[test]
     fn session_id_round_trip_through_parse_str() {
-        let id     = SessionId::new();
+        let id = SessionId::new();
         let parsed = SessionId::parse_str(&id.to_string()).unwrap();
         assert_eq!(id, parsed);
     }

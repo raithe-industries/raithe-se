@@ -6,8 +6,7 @@
 // Other crates receive cloned handles via the Metrics struct's accessor methods.
 
 use prometheus::{
-    Counter, CounterVec, Gauge, GaugeVec, HistogramOpts, HistogramVec,
-    Opts, Registry, TextEncoder,
+    Counter, CounterVec, Gauge, GaugeVec, HistogramOpts, HistogramVec, Opts, Registry, TextEncoder,
 };
 use thiserror::Error;
 
@@ -38,15 +37,15 @@ pub struct Metrics {
     registry: Registry,
 
     // §13 — all nine spec metrics:
-    pub pages_crawled_total:       CounterVec,
-    pub index_documents_total:     Gauge,
-    pub query_latency_seconds:     HistogramVec,
-    pub neural_inference_seconds:  HistogramVec,
+    pub pages_crawled_total: CounterVec,
+    pub index_documents_total: Gauge,
+    pub query_latency_seconds: HistogramVec,
+    pub neural_inference_seconds: HistogramVec,
     pub neural_execution_provider: GaugeVec,
-    pub rank_phase3_calls_total:   Counter,
-    pub errors_total:              CounterVec,
-    pub crawl_queue_depth:         Gauge,
-    pub rate_limited_total:        CounterVec,
+    pub rank_phase3_calls_total: Counter,
+    pub errors_total: CounterVec,
+    pub crawl_queue_depth: Gauge,
+    pub rate_limited_total: CounterVec,
 }
 
 impl Metrics {
@@ -138,14 +137,13 @@ impl Metrics {
             source,
         })?;
 
-        let crawl_queue_depth = Gauge::new(
-            "raithe_crawl_queue_depth",
-            "Current frontier queue depth.",
-        )
-        .map_err(|source| Error::Register {
-            name: "raithe_crawl_queue_depth",
-            source,
-        })?;
+        let crawl_queue_depth =
+            Gauge::new("raithe_crawl_queue_depth", "Current frontier queue depth.").map_err(
+                |source| Error::Register {
+                    name: "raithe_crawl_queue_depth",
+                    source,
+                },
+            )?;
 
         let rate_limited_total = CounterVec::new(
             Opts::new(
@@ -236,7 +234,9 @@ impl Metrics {
     pub fn render(&self) -> Result<String> {
         let encoder = TextEncoder::new();
         let families = self.registry.gather();
-        encoder.encode_to_string(&families).map_err(|source| Error::Encode { source })
+        encoder
+            .encode_to_string(&families)
+            .map_err(|source| Error::Encode { source })
     }
 
     /// Seeds each vec metric with a zero-value observation for all canonical
@@ -244,25 +244,50 @@ impl Metrics {
     /// startup onward, regardless of whether real observations have arrived.
     fn seed_label_sets(&self) {
         for status in &["2xx", "3xx", "4xx", "5xx", "err"] {
-            self.pages_crawled_total.with_label_values(&[status]).inc_by(0.0);
+            self.pages_crawled_total
+                .with_label_values(&[status])
+                .inc_by(0.0);
         }
         for phase in &["bm25", "gbdt", "rerank", "total"] {
-            self.query_latency_seconds.with_label_values(&[phase]).observe(0.0);
+            self.query_latency_seconds
+                .with_label_values(&[phase])
+                .observe(0.0);
         }
         for model in &["embedder", "reranker", "generator"] {
-            self.neural_inference_seconds.with_label_values(&[model]).observe(0.0);
+            self.neural_inference_seconds
+                .with_label_values(&[model])
+                .observe(0.0);
         }
         for provider in &["cuda", "directml", "coreml", "cpu"] {
-            self.neural_execution_provider.with_label_values(&[provider]).set(0.0);
+            self.neural_execution_provider
+                .with_label_values(&[provider])
+                .set(0.0);
         }
         for crate_name in &[
-            "common", "config", "storage", "crawler", "scraper", "parser",
-            "indexer", "neural", "semantic", "linkgraph", "ranker", "query",
-            "instant", "freshness", "session", "serving",
+            "common",
+            "config",
+            "storage",
+            "crawler",
+            "scraper",
+            "parser",
+            "indexer",
+            "neural",
+            "semantic",
+            "linkgraph",
+            "ranker",
+            "query",
+            "instant",
+            "freshness",
+            "session",
+            "serving",
         ] {
-            self.errors_total.with_label_values(&[crate_name, "unknown"]).inc_by(0.0);
+            self.errors_total
+                .with_label_values(&[crate_name, "unknown"])
+                .inc_by(0.0);
         }
-        self.rate_limited_total.with_label_values(&["_init"]).inc_by(0.0);
+        self.rate_limited_total
+            .with_label_values(&["_init"])
+            .inc_by(0.0);
     }
 }
 
@@ -275,10 +300,7 @@ impl Metrics {
 struct LocalTimer;
 
 impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
-    fn format_time(
-        &self,
-        w: &mut tracing_subscriber::fmt::format::Writer<'_>,
-    ) -> std::fmt::Result {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
         let now = chrono::Local::now();
         write!(w, "{}", now.format("%Y-%m-%d %H:%M:%S%.3f %Z"))
     }
@@ -292,8 +314,7 @@ impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
 pub fn init_tracing(json: bool) -> Result<()> {
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let result = if json {
         fmt()
@@ -351,7 +372,10 @@ mod tests {
     #[test]
     fn counter_increments_appear_in_render() {
         let metrics = Metrics::new().unwrap();
-        metrics.pages_crawled_total.with_label_values(&["2xx"]).inc_by(42.0);
+        metrics
+            .pages_crawled_total
+            .with_label_values(&["2xx"])
+            .inc_by(42.0);
         let rendered = metrics.render().unwrap();
         assert!(rendered.contains("42"));
     }

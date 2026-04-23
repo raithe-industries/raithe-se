@@ -20,11 +20,11 @@ pub enum AnswerKind {
 /// A resolved instant answer ready for display in the search results panel.
 #[derive(Clone, Debug)]
 pub struct InstantAnswer {
-    pub kind:    AnswerKind,
+    pub kind: AnswerKind,
     /// The human-readable answer string shown to the user.
     pub display: String,
     /// The input expression or query that produced this answer.
-    pub input:   String,
+    pub input: String,
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ fn try_calculation(raw: &str) -> Option<InstantAnswer> {
 
     let result = evalexpr::eval(raw).ok()?;
     let display = format!("{raw} = {result}");
-    let input   = raw.to_owned();
+    let input = raw.to_owned();
 
     Some(InstantAnswer {
         kind: AnswerKind::Calculation,
@@ -99,11 +99,11 @@ fn try_unit_conversion(raw: &str) -> Option<InstantAnswer> {
     let rhs = lower[idx + connector.len()..].trim();
 
     let (value, from_unit) = split_number_unit(lhs)?;
-    let to_unit            = rhs;
+    let to_unit = rhs;
 
     let converted = convert_units(value, from_unit, to_unit)?;
-    let display   = format!("{value} {from_unit} = {converted:.4} {to_unit}");
-    let input     = raw.to_owned();
+    let display = format!("{value} {from_unit} = {converted:.4} {to_unit}");
+    let input = raw.to_owned();
 
     Some(InstantAnswer {
         kind: AnswerKind::UnitConversion,
@@ -128,13 +128,13 @@ fn try_currency(raw: &str) -> Option<InstantAnswer> {
     let rhs = lower[idx + connector.len()..].trim().to_uppercase();
 
     let (value, from_code) = split_number_unit(lhs)?;
-    let from_code          = from_code.to_uppercase();
+    let from_code = from_code.to_uppercase();
 
     let from_rate = usd_rate(&from_code)?;
-    let to_rate   = usd_rate(&rhs)?;
+    let to_rate = usd_rate(&rhs)?;
     let converted = value / from_rate * to_rate;
-    let display   = format!("{value} {from_code} ≈ {converted:.2} {rhs}");
-    let input     = raw.to_owned();
+    let display = format!("{value} {from_code} ≈ {converted:.2} {rhs}");
+    let input = raw.to_owned();
 
     Some(InstantAnswer {
         kind: AnswerKind::Currency,
@@ -165,7 +165,7 @@ fn try_time_zone(raw: &str) -> Option<InstantAnswer> {
     }
 
     let display = format!("Time in {location}: TODO(impl)");
-    let input   = raw.to_owned();
+    let input = raw.to_owned();
 
     Some(InstantAnswer {
         kind: AnswerKind::TimeZone,
@@ -184,10 +184,10 @@ fn has_math_chars(s: &str) -> bool {
 
 /// Splits a string like `"5.2 km"` into `(5.2, "km")`.
 fn split_number_unit(s: &str) -> Option<(f64, &str)> {
-    let s       = s.trim();
-    let split   = s.find(|c: char| c.is_alphabetic())?;
-    let number  = s[..split].trim().parse::<f64>().ok()?;
-    let unit    = s[split..].trim();
+    let s = s.trim();
+    let split = s.find(|c: char| c.is_alphabetic())?;
+    let number = s[..split].trim().parse::<f64>().ok()?;
+    let unit = s[split..].trim();
     Some((number, unit))
 }
 
@@ -202,54 +202,54 @@ fn convert_units(value: f64, from: &str, to: &str) -> Option<f64> {
 fn to_si(value: f64, unit: &str) -> Option<f64> {
     match unit {
         // Length → metres
-        "m" | "metre" | "metres"     => Some(value),
-        "km" | "kilometres"          => Some(value * 1_000.0),
-        "cm"                         => Some(value / 100.0),
-        "mm"                         => Some(value / 1_000.0),
-        "mi" | "miles" | "mile"      => Some(value * 1_609.344),
-        "ft" | "feet" | "foot"       => Some(value * 0.3048),
-        "in" | "inches" | "inch"     => Some(value * 0.0254),
-        "yd" | "yards" | "yard"      => Some(value * 0.9144),
+        "m" | "metre" | "metres" => Some(value),
+        "km" | "kilometres" => Some(value * 1_000.0),
+        "cm" => Some(value / 100.0),
+        "mm" => Some(value / 1_000.0),
+        "mi" | "miles" | "mile" => Some(value * 1_609.344),
+        "ft" | "feet" | "foot" => Some(value * 0.3048),
+        "in" | "inches" | "inch" => Some(value * 0.0254),
+        "yd" | "yards" | "yard" => Some(value * 0.9144),
         // Mass → kilograms
-        "kg" | "kilograms"           => Some(value),
-        "g"  | "grams"               => Some(value / 1_000.0),
-        "lb" | "lbs" | "pounds"      => Some(value * 0.453_592),
-        "oz" | "ounces"              => Some(value * 0.028_349_5),
-        "t"  | "tonnes"              => Some(value * 1_000.0),
+        "kg" | "kilograms" => Some(value),
+        "g" | "grams" => Some(value / 1_000.0),
+        "lb" | "lbs" | "pounds" => Some(value * 0.453_592),
+        "oz" | "ounces" => Some(value * 0.028_349_5),
+        "t" | "tonnes" => Some(value * 1_000.0),
         // Temperature → Celsius (as SI proxy for conversions)
-        "c"  | "celsius"             => Some(value),
-        "f"  | "fahrenheit"          => Some((value - 32.0) * 5.0 / 9.0),
-        "k"  | "kelvin"              => Some(value - 273.15),
+        "c" | "celsius" => Some(value),
+        "f" | "fahrenheit" => Some((value - 32.0) * 5.0 / 9.0),
+        "k" | "kelvin" => Some(value - 273.15),
         // Speed → m/s
-        "ms" | "m/s"                 => Some(value),
-        "kmh" | "km/h"               => Some(value / 3.6),
-        "mph"                        => Some(value * 0.44704),
-        _                            => None,
+        "ms" | "m/s" => Some(value),
+        "kmh" | "km/h" => Some(value / 3.6),
+        "mph" => Some(value * 0.44704),
+        _ => None,
     }
 }
 
 fn from_si(si: f64, unit: &str) -> Option<f64> {
     match unit {
-        "m" | "metre" | "metres"     => Some(si),
-        "km" | "kilometres"          => Some(si / 1_000.0),
-        "cm"                         => Some(si * 100.0),
-        "mm"                         => Some(si * 1_000.0),
-        "mi" | "miles" | "mile"      => Some(si / 1_609.344),
-        "ft" | "feet" | "foot"       => Some(si / 0.3048),
-        "in" | "inches" | "inch"     => Some(si / 0.0254),
-        "yd" | "yards" | "yard"      => Some(si / 0.9144),
-        "kg" | "kilograms"           => Some(si),
-        "g"  | "grams"               => Some(si * 1_000.0),
-        "lb" | "lbs" | "pounds"      => Some(si / 0.453_592),
-        "oz" | "ounces"              => Some(si / 0.028_349_5),
-        "t"  | "tonnes"              => Some(si / 1_000.0),
-        "c"  | "celsius"             => Some(si),
-        "f"  | "fahrenheit"          => Some(si * 9.0 / 5.0 + 32.0),
-        "k"  | "kelvin"              => Some(si + 273.15),
-        "ms" | "m/s"                 => Some(si),
-        "kmh" | "km/h"               => Some(si * 3.6),
-        "mph"                        => Some(si / 0.44704),
-        _                            => None,
+        "m" | "metre" | "metres" => Some(si),
+        "km" | "kilometres" => Some(si / 1_000.0),
+        "cm" => Some(si * 100.0),
+        "mm" => Some(si * 1_000.0),
+        "mi" | "miles" | "mile" => Some(si / 1_609.344),
+        "ft" | "feet" | "foot" => Some(si / 0.3048),
+        "in" | "inches" | "inch" => Some(si / 0.0254),
+        "yd" | "yards" | "yard" => Some(si / 0.9144),
+        "kg" | "kilograms" => Some(si),
+        "g" | "grams" => Some(si * 1_000.0),
+        "lb" | "lbs" | "pounds" => Some(si / 0.453_592),
+        "oz" | "ounces" => Some(si / 0.028_349_5),
+        "t" | "tonnes" => Some(si / 1_000.0),
+        "c" | "celsius" => Some(si),
+        "f" | "fahrenheit" => Some(si * 9.0 / 5.0 + 32.0),
+        "k" | "kelvin" => Some(si + 273.15),
+        "ms" | "m/s" => Some(si),
+        "kmh" | "km/h" => Some(si * 3.6),
+        "mph" => Some(si / 0.44704),
+        _ => None,
     }
 }
 
@@ -267,7 +267,7 @@ fn usd_rate(code: &str) -> Option<f64> {
         "CNY" => Some(7.24),
         "INR" => Some(83.1),
         "MXN" => Some(17.1),
-        _     => None,
+        _ => None,
     }
 }
 

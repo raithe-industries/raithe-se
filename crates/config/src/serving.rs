@@ -22,11 +22,11 @@ pub struct ServingConfig {
 impl Default for ServingConfig {
     fn default() -> Self {
         Self {
-            bind:              String::from("0.0.0.0:8080"),
-            metrics_bind:      String::from("0.0.0.0:9090"),
+            bind: String::from("0.0.0.0:8080"),
+            metrics_bind: String::from("0.0.0.0:9090"),
             max_request_bytes: 8192,
-            session_ttl_secs:  3_600,
-            allowed_origins:   Vec::new(),
+            session_ttl_secs: 3_600,
+            allowed_origins: Vec::new(),
         }
     }
 }

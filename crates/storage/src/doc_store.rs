@@ -19,9 +19,9 @@ use crate::{Error, Result};
 /// The internal counter is advanced via `DocumentId::next()` — integer
 /// overflow returns `Error::DocIdExhausted` rather than wrapping.
 pub struct DocStore {
-    _path:   PathBuf,
+    _path: PathBuf,
     counter: Mutex<DocumentId>,
-    map:     Mutex<HashMap<DocumentId, Vec<u8>>>,
+    map: Mutex<HashMap<DocumentId, Vec<u8>>>,
 }
 
 impl DocStore {
@@ -32,9 +32,9 @@ impl DocStore {
             source,
         })?;
         Ok(Self {
-            _path:   path.to_path_buf(),
+            _path: path.to_path_buf(),
             counter: Mutex::new(DocumentId::ZERO),
-            map:     Mutex::new(HashMap::new()),
+            map: Mutex::new(HashMap::new()),
         })
     }
 
@@ -69,8 +69,8 @@ impl DocStore {
             None => return Ok(None),
         };
 
-        let decompressed = zstd::decode_all(compressed.as_slice())
-            .map_err(|source| Error::Compress { source })?;
+        let decompressed =
+            zstd::decode_all(compressed.as_slice()).map_err(|source| Error::Compress { source })?;
         Ok(Some(decompressed))
     }
 

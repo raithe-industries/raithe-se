@@ -8,18 +8,7 @@ use serde::{Deserialize, Serialize};
 /// A point in time expressed as milliseconds since the Unix epoch.
 ///
 /// Negative values represent instants before 1970-01-01T00:00:00Z.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-    Deserialize,
-    Serialize,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub struct Timestamp(i64);
 
 impl Timestamp {

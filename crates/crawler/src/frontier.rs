@@ -11,7 +11,7 @@ use rusqlite::{params, Connection};
 
 /// An entry popped from the frontier.
 pub struct FrontierEntry {
-    pub url:   Url,
+    pub url: Url,
     pub depth: u32,
 }
 
@@ -29,8 +29,7 @@ impl Frontier {
     ///
     /// Returns an error string on SQLite failure.
     pub fn new(seeds: &[Url]) -> Result<Self, String> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| e.to_string())?;
+        let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
 
         conn.execute_batch(
             "CREATE TABLE frontier (
@@ -69,7 +68,7 @@ impl Frontier {
                 "SELECT id, url FROM frontier ORDER BY depth ASC, id ASC LIMIT 1",
                 [],
                 |row| {
-                    let id:  i64    = row.get(0)?;
+                    let id: i64 = row.get(0)?;
                     let url: String = row.get(1)?;
                     Ok((id, url))
                 },
@@ -109,8 +108,10 @@ impl Frontier {
     /// Returns the current number of URLs in the frontier.
     pub fn depth(&self) -> u64 {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        conn.query_row("SELECT COUNT(*) FROM frontier", [], |row| row.get::<_, i64>(0))
-            .unwrap_or(0) as u64
+        conn.query_row("SELECT COUNT(*) FROM frontier", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(0) as u64
     }
 }
 
@@ -143,12 +144,12 @@ mod tests {
         let frontier = Frontier::new(&seeds).unwrap();
         frontier.push(&url("https://a.com/deep"), 1);
         // Both depth-0 seeds must come before the depth-1 entry.
-        let first  = frontier.pop().unwrap();
+        let first = frontier.pop().unwrap();
         let second = frontier.pop().unwrap();
-        let third  = frontier.pop().unwrap();
-        assert_eq!(first.depth,  0);
+        let third = frontier.pop().unwrap();
+        assert_eq!(first.depth, 0);
         assert_eq!(second.depth, 0);
-        assert_eq!(third.depth,  1);
+        assert_eq!(third.depth, 1);
     }
 
     #[test]

@@ -9,16 +9,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Two documents are considered near-duplicates when their Hamming distance
 /// is at or below the detection threshold (typically 3 bits).
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    PartialEq,
-    Deserialize,
-    Serialize,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct SimHash(u64);
 
 impl SimHash {
@@ -62,16 +53,17 @@ impl SimHash {
                 counts[bit as usize] += vote;
             }
         }
-        let fingerprint = counts
-            .iter()
-            .enumerate()
-            .fold(0u64, |acc, (bit, &count)| {
-                if count > 0 {
-                    acc | (1u64 << bit)
-                } else {
-                    acc
-                }
-            });
+        let fingerprint =
+            counts.iter().enumerate().fold(
+                0u64,
+                |acc, (bit, &count)| {
+                    if count > 0 {
+                        acc | (1u64 << bit)
+                    } else {
+                        acc
+                    }
+                },
+            );
         Self(fingerprint)
     }
 }

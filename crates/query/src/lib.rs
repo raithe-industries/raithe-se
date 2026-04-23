@@ -27,14 +27,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// using the Qwen2.5 LLM. `NeuralEngine` is held behind a `Mutex` because
 /// `generate` requires `&mut self` on the ONNX session.
 pub struct QueryProcessor {
-    neural:  Mutex<NeuralEngine>,
+    neural: Mutex<NeuralEngine>,
     _metrics: Arc<Metrics>,
 }
 
 impl QueryProcessor {
     /// Constructs a `QueryProcessor` wrapping the given neural engine.
     pub fn new(neural: NeuralEngine, metrics: Arc<Metrics>) -> Self {
-        let neural   = Mutex::new(neural);
+        let neural = Mutex::new(neural);
         let _metrics = metrics;
         Self { neural, _metrics }
     }
@@ -48,8 +48,8 @@ impl QueryProcessor {
     ///   4. Rewrite via Qwen2.5 LLM.
     pub fn process(&self, raw: &str) -> Result<ParsedQuery> {
         let original = raw.trim().to_owned();
-        let tokens   = tokenise(&original);
-        let intent   = classify_intent(&tokens);
+        let tokens = tokenise(&original);
+        let intent = classify_intent(&tokens);
         let synonyms = expand_synonyms(&tokens);
         let rewritten = self.rewrite(&original)?;
 
@@ -73,9 +73,9 @@ impl QueryProcessor {
         );
 
         let mut engine = self.neural.lock().map_err(|_| Error::LockPoisoned)?;
-        let rewritten  = engine
-            .generate(&prompt)
-            .map_err(|err| Error::Rewrite { reason: err.to_string() })?;
+        let rewritten = engine.generate(&prompt).map_err(|err| Error::Rewrite {
+            reason: err.to_string(),
+        })?;
 
         let rewritten = rewritten.trim().to_owned();
         if rewritten.is_empty() {
@@ -105,7 +105,7 @@ fn tokenise(query: &str) -> Vec<String> {
 /// available (MEDIUM priority).
 fn classify_intent(tokens: &[String]) -> QueryIntent {
     let navigational_signals = ["site", "www", "http", "https", ".com", ".org"];
-    let local_signals        = ["near", "nearby", "in", "around", "location"];
+    let local_signals = ["near", "nearby", "in", "around", "location"];
     let transactional_signals = ["buy", "shop", "price", "order", "cheap", "deal", "discount"];
 
     for token in tokens {
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn synonyms_same_length_as_tokens() {
-        let tokens   = tokenise("fast search engine");
+        let tokens = tokenise("fast search engine");
         let synonyms = expand_synonyms(&tokens);
         assert_eq!(synonyms.len(), tokens.len());
     }

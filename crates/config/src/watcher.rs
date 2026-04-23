@@ -39,10 +39,7 @@ pub fn watch(path: PathBuf) -> Result<watch::Receiver<Config>> {
     Ok(rx)
 }
 
-async fn run_watcher(
-    path: PathBuf,
-    tx: watch::Sender<Config>,
-) -> Result<()> {
+async fn run_watcher(path: PathBuf, tx: watch::Sender<Config>) -> Result<()> {
     // std::sync::mpsc so the notify callback (non-async thread) can send
     // without needing a runtime handle.
     let (event_tx, event_rx) = mpsc::channel::<()>();
@@ -85,9 +82,7 @@ async fn run_watcher(
                 eprintln!("raithe-config: reloaded from {}", path.display());
             }
             Err(err) => {
-                eprintln!(
-                    "raithe-config: reload rejected, running config unchanged: {err}"
-                );
+                eprintln!("raithe-config: reload rejected, running config unchanged: {err}");
             }
         }
     }
