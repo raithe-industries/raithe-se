@@ -204,16 +204,181 @@ get_task() {
 
 get_model_class() {
     local task="$1"
-    if [[ "$task" == "text-generation" ]]; then
-        echo "AutoModelForCausalLM"
-    elif [[ "$task" == "text2text-generation" ]]; then
-        echo "AutoModelForSeq2SeqLM"
-    elif [[ "$task" == "text-classification" ]]; then
-        echo "AutoModelForSequenceClassification"
-    else
-        # feature-extraction + any unknown task defaults to base AutoModel.
-        echo "AutoModel"
+    case "$task" in
+        text-generation)      echo "AutoModelForCausalLM" ;;
+        text2text-generation) echo "AutoModelForSeq2SeqLM" ;;
+        text-classification)  echo "AutoModelForSequenceClassification" ;;# BINARY CHECK
+170
+# ==============================================================================
+171
+​
+172
+if [[ ! -x "$BINARY" ]]; then
+173
+    fail "raithe-se binary not found — run: cargo build --release"
+174
+fi
+175
+​
+176
+# ==============================================================================
+177
+# MODEL INSTALLATION / VALIDATION
+178
+# ==============================================================================
+179
+​
+180
+declare -A MODEL_MIN_BYTES=(
+181
+    [embedder]=$((1200  * 1024 * 1024))
+182
+    [reranker]=$((1800  * 1024 * 1024))
+183
+    [generator]=$((10000 * 1024 * 1024))
+184
+)
+185
+​
+186
+get_task() {
+187
+    local model_id="$1"
+188
+    if [[ "$model_id" == *"bge-large"* || "$model_id" == *"bge-base"* \
+189
+       || "$model_id" == *"bge-small"* ]]; then
+190
+        echo "feature-extraction"; return
+191
     fi
+192
+    if [[ "$model_id" == *"reranker"* || "$model_id" == *"cross-encoder"* ]]; then
+193
+        echo "text-classification"; return
+194
+    fi
+195
+    if [[ "$model_id" == *"flan"* || "$model_id" == *"t5"* ]]; then
+196
+        echo "text2text-generation"; return
+197
+    fi
+198
+    if [[ "$model_id" == *"Qwen"* || "$model_id" == *"Llama"* \
+199
+       || "$model_id" == *"Mistral"* ]]; then
+200
+        echo "text-generation"; return
+201
+    fi
+202
+    echo "text-classification"
+203
+}
+204
+​
+205
+get_model_class() {
+206
+    local task="$1"
+207
+    case "$task" in
+208
+        text-generation)      echo "AutoModelForCausalLM" ;;
+209
+        text2text-generation) echo "AutoModelForSeq2SeqLM" ;;
+210
+        text-classification)  echo "AutoModelForSequenceClassification" ;;
+211
+        feature-extraction)   echo "AutoModel" ;;
+212
+        *)                    echo "AutoModel" ;;
+213
+    esac
+214
+}
+215
+​
+216
+model_is_valid() {
+217
+    local subdir="$1"
+218
+    local dest="$MODEL_BASE/$subdir"
+219
+    [[ -f "$dest/model.onnx" && -f "$dest/tokenizer.json" ]] || return 1
+220
+    local onnx_b data_b total_b
+221
+    onnx_b=$(stat -c%s "$dest/model.onnx")
+222
+    data_b=0
+223
+    [[ -f "$dest/model.onnx_data" ]] && data_b=$(stat -c%s "$dest/model.onnx_data")
+224
+    total_b=$(( onnx_b + data_b ))
+225
+    [[ $total_b -ge ${MODEL_MIN_BYTES[$subdir]} ]] || return 1
+226
+    return 0
+227
+}
+228
+​
+229
+export_model() {
+230
+    local subdir="$1"
+231
+    local hf_id="$2"
+232
+​
+233
+    local dest="$MODEL_BASE/$subdir"
+234
+    local work="$dest/_work"
+235
+    local task model_class
+236
+    task=$(get_task "$hf_id")
+237
+    model_class=$(get_model_class "$task")
+238
+​
+239
+    if [[ "$FORCE_INSTALL" -eq 0 ]] && model_is_valid "$subdir"; then
+240
+        local onnx_b data_b total_mb
+241
+        onnx_b=$(stat -c%s "$dest/model.onnx")
+242
+        data_b=0
+243
+        [[ -f "$dest/model.onnx_data" ]] && data_b=$(stat -c%s "$dest/model.onnx_data")
+244
+        total_mb=$(( (onnx_b + data_b) / 1024 / 1024 ))
+245
+        skip "$subdir ($hf_id) — ${total_mb} MB"
+246
+        return
+247
+    fi
+248
+​
+249
+    step "Exporting $subdir → $hf_id  [$task]  $model_class"
+250
+​
+251
+    rm -rf "$work"
+252
+    mkdir -p "$work" "$dest"
+253
+
+        feature-extraction)   echo "AutoModel" ;;
+        *)                    echo "AutoModel" ;;
+    esac
 }
 
 model_is_valid() {
@@ -377,8 +542,28 @@ try:
         onnx_config_ctor = TasksManager._SUPPORTED_MODEL_TYPE["qwen2"]["onnx"]["text-generation-with-past"]
         onnx_config = onnx_config_ctor(hf_config, use_past=True)
 
-        model = AutoModelForCausalLM.from_pretrained(
-            str(work), trust_remote_code=True, torch_dtype=torch.float32,
+    model = AutoModelForCausalLM.from_pretrained(
+        str(work), trust_remote_code=True, torch_dtype=torch.float32,
+    )
+    model.eval()
+
+    dummy_inputs = onnx_config.generate_dummy_inputs(framework="pt")
+    input_names = list(dummy_inputs.keys())
+    output_names = list(onnx_config.outputs.keys())
+    dynamic_axes = {**onnx_config.inputs, **onnx_config.outputs}
+
+    with torch.no_grad():
+        torch.onnx.export(
+            model,
+            tuple(dummy_inputs.values()),
+            str(out_path),
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            opset_version=14,
+            do_constant_folding=False,
+            onnx_shape_inference=False,
+            use_external_data_format=True,
         )
         model.eval()
 
