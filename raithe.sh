@@ -362,52 +362,18 @@ try:
     output_names = list(onnx_config.outputs.keys())
     dynamic_axes = {**onnx_config.inputs, **onnx_config.outputs}
 
-    def export_with_torch_onnx() -> None:
-        # Use keyword arguments explicitly so large-model external-data export
-        # is treated as a real filesystem path by torch.onnx.
-        with torch.no_grad():
-            torch.onnx.export(
-                model=model,
-                args=(),
-                kwargs=dummy_inputs,
-                f=str(out_path),
-                input_names=input_names,
-                output_names=output_names,
-                dynamic_axes=dynamic_axes,
-                opset_version=14,
-                do_constant_folding=False,
-                onnx_shape_inference=False,
-                use_external_data_format=True,
-            )
-
-    try:
-        export_with_torch_onnx()
-    except RuntimeError as err:
-        # Some torch/onnx combinations still run a protobuf serialization path
-        # during shape/type inference for >2GiB graphs. Fall back to Optimum's
-        # exporter, which writes external data in a file-backed flow.
-        if "2GiB limit imposed by the protobuf library" not in str(err):
-            raise
-
-        import subprocess
-
-        subprocess.run(
-            [
-                "optimum-cli",
-                "export",
-                "onnx",
-                "-m",
-                str(work),
-                "--task",
-                "text-generation-with-past",
-                "--framework",
-                "pt",
-                "--dtype",
-                "fp32",
-                "--monolith",
-                str(out_dir),
-            ],
-            check=True,
+    with torch.no_grad():
+        torch.onnx.export(
+            model,
+            tuple(dummy_inputs.values()),
+            str(out_path),
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            opset_version=14,
+            do_constant_folding=False,
+            onnx_shape_inference=False,
+            use_external_data_format=True,
         )
 
     # Re-save to guarantee proper external data layout (single file, no threshold)
