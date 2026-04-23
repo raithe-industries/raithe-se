@@ -372,6 +372,7 @@ try:
             dynamic_axes=dynamic_axes,
             opset_version=14,
             do_constant_folding=False,
+            onnx_shape_inference=False,
             use_external_data_format=True,
         )
 
