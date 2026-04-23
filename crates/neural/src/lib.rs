@@ -396,9 +396,9 @@ fn probe_provider(
 fn probe_once(
     eps:  Vec<ExecutionProviderDispatch>,
     path: &Path,
-) -> std::result::Result<Session, Box<dyn std::error::Error + Send + Sync>> {
+) -> std::result::Result<Session, Box<dyn std::error::Error>> {
     let builder = Session::builder()?;
-    let builder = builder.with_execution_providers(eps)?;
+    let mut builder = builder.with_execution_providers(eps)?;
     let session = builder.commit_from_file(path)?;
     Ok(session)
 }
