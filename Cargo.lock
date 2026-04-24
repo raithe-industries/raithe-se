@@ -2880,6 +2880,7 @@ name = "raithe-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "indicatif",
  "raithe-common",
  "raithe-config",
  "raithe-crawler",
