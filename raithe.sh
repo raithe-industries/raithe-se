@@ -180,7 +180,9 @@ fi
 declare -A MODEL_MIN_BYTES=(
     [embedder]=$((1200  * 1024 * 1024))
     [reranker]=$((1800  * 1024 * 1024))
-    [generator]=$((10000 * 1024 * 1024))
+    # Generator floor sized for the 0.5B fp32 fallback. Primary (7B ~14 GB,
+    # 14B ~28 GB) and 1.5B fallback (~6 GB) all clear comfortably.
+    [generator]=$((1800  * 1024 * 1024))
 )
 
 get_task() {
@@ -301,6 +303,11 @@ PYEOF
     if [[ $dl_rc -ne 0 ]]; then
         echo -e "${RED}✗ Stage 1 failed for $hf_id — exit $dl_rc${RESET}" >&2
         cat "$work/download.log" >&2
+        if [[ "$task" == "text-generation" ]]; then
+            warn "download failed for $hf_id — will try next candidate"
+            rm -rf "$work" "$dest"
+            return 1
+        fi
         fail "download failed for $hf_id"
     fi
     ok "download complete"
@@ -311,22 +318,130 @@ PYEOF
     rm -rf "$work/onnx"
     mkdir -p "$work/onnx"
 
-    # optimum-cli handles every pinned task (feature-extraction,
-    # text-classification, text-generation, text2text-generation) and auto-
-    # splits model weights into model.onnx_data when the graph exceeds the
-    # 2 GiB protobuf single-message limit. task=text-generation (no
-    # -with-past) produces a single decoder graph matching the Rust
-    # generator_step re-feed contract (neural/src/lib.rs §NeuralEngine::generate).
-    local export_flags="--framework pt --dtype fp32 --monolith"
-    # shellcheck disable=SC2086
-    OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
-    optimum-cli export onnx \
-        -m "$work" --task "$task" $export_flags "$work/onnx" \
-        >"$work/export.log" 2>&1 || {
-        echo -e "${RED}✗ ONNX export failed for $hf_id${RESET}" >&2
-        cat "$work/export.log" >&2
-        fail "ONNX export failed for $hf_id ($task)"
-    }
+    if [[ "$task" == "text-generation" ]]; then
+        # Dynamo exporter path for causal-LM text-generation. The legacy
+        # TorchScript exporter (used by optimum-cli) runs
+        # _jit_pass_onnx_graph_shape_type_inference which serializes the
+        # whole ModelProto into a single in-memory protobuf *before* writing
+        # to disk — hard 2 GiB ceiling, fails for Qwen2.5-7B fp32 (~14 GB).
+        # torch.onnx.export(dynamo=True) uses torch.export/FX instead and
+        # emits external-data-format output natively.
+        set +e
+        OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
+        python3 - >"$work/export.log" 2>&1 <<PYEOF
+import warnings, logging, os, sys
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TQDM_DISABLE"]           = "1"
+os.environ["OMP_NUM_THREADS"]        = "${CPU_CORES}"
+os.environ["MKL_NUM_THREADS"]        = "${CPU_CORES}"
+warnings.filterwarnings("ignore")
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("torch").setLevel(logging.ERROR)
+logging.getLogger("torch.onnx").setLevel(logging.ERROR)
+
+try:
+    import torch
+    import torch.nn as nn
+    from transformers import AutoModelForCausalLM
+except ImportError as e:
+    print(f"IMPORT_ERROR: {e}", file=sys.stderr); sys.exit(2)
+
+class CausalLMLogitsWrapper(nn.Module):
+    """Strip HF's ModelOutput tree (past_key_values, hidden_states,
+    attentions, loss) to the (input_ids, attention_mask) -> logits contract
+    that generator_step in crates/neural/src/lib.rs expects. use_cache=False
+    disables KV-cache side-outputs; the Rust path re-feeds the full token
+    sequence each step."""
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+    def forward(self, input_ids, attention_mask):
+        return self.inner(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+            return_dict=True,
+        ).logits
+
+work_dir = "${work}"
+out_dir  = os.path.join(work_dir, "onnx")
+out_path = os.path.join(out_dir, "model.onnx")
+os.makedirs(out_dir, exist_ok=True)
+
+try:
+    model = AutoModelForCausalLM.from_pretrained(
+        work_dir, trust_remote_code=True, torch_dtype=torch.float32,
+    ).eval()
+    wrapped = CausalLMLogitsWrapper(model).eval()
+
+    example_ids  = torch.zeros(1, 8, dtype=torch.long)
+    example_mask = torch.ones(1, 8, dtype=torch.long)
+    batch = torch.export.Dim("batch", min=1, max=8)
+    seq   = torch.export.Dim("seq",   min=2, max=16384)
+
+    with torch.inference_mode():
+        onnx_program = torch.onnx.export(
+            wrapped,
+            (example_ids, example_mask),
+            dynamo=True,
+            input_names=["input_ids", "attention_mask"],
+            output_names=["logits"],
+            dynamic_shapes={
+                "input_ids":      {0: batch, 1: seq},
+                "attention_mask": {0: batch, 1: seq},
+            },
+        )
+
+    # ONNXProgram.save() in torch>=2.5 writes external data adjacent to the
+    # .onnx file when weights exceed the 2 GiB protobuf limit (produces
+    # model.onnx + model.onnx_data). If save() cannot split, fall through to
+    # onnx.save_model with explicit external-data config.
+    try:
+        onnx_program.save(out_path)
+    except Exception:
+        import onnx
+        proto = None
+        for attr in ("model_proto", "model", "_model_proto"):
+            cand = getattr(onnx_program, attr, None)
+            if cand is not None and hasattr(cand, "graph"):
+                proto = cand
+                break
+        if proto is None:
+            raise
+        onnx.save_model(
+            proto, out_path,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location="model.onnx_data",
+            size_threshold=1024,
+            convert_attribute=False,
+        )
+    print("OK", flush=True)
+except Exception as e:
+    import traceback; traceback.print_exc(file=sys.stderr)
+    print(f"EXPORT_ERROR: {type(e).__name__}: {e}", file=sys.stderr); sys.exit(3)
+PYEOF
+        export_rc=$?
+        set -e
+        if [[ $export_rc -ne 0 ]]; then
+            warn "dynamo export failed for $hf_id (rc=$export_rc)"
+            tail -n 30 "$work/export.log" >&2
+            rm -rf "$work" "$dest"
+            return 1
+        fi
+    else
+        local export_flags="--framework pt --dtype fp32 --monolith"
+        # shellcheck disable=SC2086
+        OMP_NUM_THREADS=$CPU_CORES MKL_NUM_THREADS=$CPU_CORES \
+        optimum-cli export onnx \
+            -m "$work" --task "$task" $export_flags "$work/onnx" \
+            >"$work/export.log" 2>&1 || {
+            echo -e "${RED}✗ ONNX export failed for $hf_id${RESET}" >&2
+            cat "$work/export.log" >&2
+            fail "ONNX export failed for $hf_id ($task)"
+        }
+    fi
 
     local onnx_check
     onnx_check=$(find "$work/onnx" -name "*.onnx" -size +0c | head -n 1 || true)
@@ -348,6 +463,11 @@ PYEOF
 
     if [[ $total_b -lt ${MODEL_MIN_BYTES[$subdir]} ]]; then
         echo -e "${RED}✗ $hf_id: ${total_mb} MB total < ${min_mb} MB minimum${RESET}" >&2
+        if [[ "$task" == "text-generation" ]]; then
+            warn "size-validate failed for $hf_id — will try next candidate"
+            rm -rf "$work" "$dest"
+            return 1
+        fi
         fail "Corrupt ONNX export for $hf_id (${total_mb} MB < ${min_mb} MB)"
     fi
     ok "Validated: ${total_mb} MB ≥ ${min_mb} MB minimum"
@@ -411,7 +531,46 @@ if [[ $RUN_ONLY -eq 0 ]]; then
 
         export_model "embedder"  "BAAI/bge-large-en-v1.5"
         export_model "reranker"  "BAAI/bge-reranker-large"
-        export_model "generator" "$GENERATOR_ID"
+
+        # Generator fallback chain. The primary candidate is auto-selected
+        # upstream by RAM/VRAM tier; on export failure, cascade through
+        # progressively smaller Qwen2.5 Instruct variants. The list below
+        # the primary is kept monotonically decreasing so a retry never
+        # re-attempts the primary or anything larger than it.
+        case "$GENERATOR_ID" in
+            "Qwen/Qwen2.5-14B-Instruct")
+                GENERATOR_FALLBACKS=(
+                    "Qwen/Qwen2.5-7B-Instruct:Qwen2.5-7B-Instruct"
+                    "Qwen/Qwen2.5-1.5B-Instruct:Qwen2.5-1.5B-Instruct"
+                    "Qwen/Qwen2.5-0.5B-Instruct:Qwen2.5-0.5B-Instruct"
+                ) ;;
+            "Qwen/Qwen2.5-7B-Instruct")
+                GENERATOR_FALLBACKS=(
+                    "Qwen/Qwen2.5-1.5B-Instruct:Qwen2.5-1.5B-Instruct"
+                    "Qwen/Qwen2.5-0.5B-Instruct:Qwen2.5-0.5B-Instruct"
+                ) ;;
+            *)
+                GENERATOR_FALLBACKS=() ;;
+        esac
+
+        generator_installed=0
+        GENERATOR_CANDIDATES=(
+            "$GENERATOR_ID:$GENERATOR_DISPLAY"
+            "${GENERATOR_FALLBACKS[@]}"
+        )
+        for spec in "${GENERATOR_CANDIDATES[@]}"; do
+            cand_id="${spec%%:*}"
+            cand_display="${spec##*:}"
+            if export_model "generator" "$cand_id"; then
+                GENERATOR_ID="$cand_id"
+                GENERATOR_DISPLAY="$cand_display"
+                generator_installed=1
+                break
+            fi
+            warn "generator candidate $cand_display failed — trying next"
+        done
+        [[ $generator_installed -eq 1 ]] \
+            || fail "All generator fallback candidates exhausted"
 
         step "Final verification"
         ALL_OK=1
