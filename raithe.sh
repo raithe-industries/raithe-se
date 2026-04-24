@@ -215,15 +215,34 @@ get_model_class() {
     esac
 }
 
+# External data for an ONNX model may be written as either "model.onnx_data"
+# (underscore — onnx.save_model's default) or "model.onnx.data" (period —
+# torch ONNXProgram.save's default). Both conventions are valid per the ONNX
+# external-data spec; the exact filename lives inside the .onnx protobuf's
+# TensorProto.external_data.location field. Renaming on disk would desync
+# that reference and break ORT's loader, so validators below instead accept
+# whichever name the exporter chose.
+_model_data_file() {
+    local dir="$1" f
+    for f in "$dir/model.onnx_data" "$dir/model.onnx.data"; do
+        [[ -f "$f" ]] && { echo "$f"; return 0; }
+    done
+    return 1
+}
+
+_model_total_bytes() {
+    local dir="$1" onnx_b=0 data_b=0 data_path
+    [[ -f "$dir/model.onnx" ]] && onnx_b=$(stat -c%s "$dir/model.onnx")
+    data_path=$(_model_data_file "$dir") && data_b=$(stat -c%s "$data_path")
+    echo $(( onnx_b + data_b ))
+}
+
 model_is_valid() {
     local subdir="$1"
     local dest="$MODEL_BASE/$subdir"
     [[ -f "$dest/model.onnx" && -f "$dest/tokenizer.json" ]] || return 1
-    local onnx_b data_b total_b
-    onnx_b=$(stat -c%s "$dest/model.onnx")
-    data_b=0
-    [[ -f "$dest/model.onnx_data" ]] && data_b=$(stat -c%s "$dest/model.onnx_data")
-    total_b=$(( onnx_b + data_b ))
+    local total_b
+    total_b=$(_model_total_bytes "$dest")
     [[ $total_b -ge ${MODEL_MIN_BYTES[$subdir]} ]] || return 1
     return 0
 }
@@ -239,11 +258,8 @@ export_model() {
     model_class=$(get_model_class "$task")
 
     if [[ "$FORCE_INSTALL" -eq 0 ]] && model_is_valid "$subdir"; then
-        local onnx_b data_b total_mb
-        onnx_b=$(stat -c%s "$dest/model.onnx")
-        data_b=0
-        [[ -f "$dest/model.onnx_data" ]] && data_b=$(stat -c%s "$dest/model.onnx_data")
-        total_mb=$(( (onnx_b + data_b) / 1024 / 1024 ))
+        local total_mb
+        total_mb=$(( $(_model_total_bytes "$dest") / 1024 / 1024 ))
         skip "$subdir ($hf_id) — ${total_mb} MB"
         return
     fi
@@ -576,13 +592,9 @@ if [[ $RUN_ONLY -eq 0 ]]; then
         ALL_OK=1
         for subdir in embedder reranker generator; do
             if model_is_valid "$subdir"; then
-                onnx_b=$(stat -c%s "$MODEL_BASE/$subdir/model.onnx")
-                data_b=0
-                [[ -f "$MODEL_BASE/$subdir/model.onnx_data" ]] \
-                    && data_b=$(stat -c%s "$MODEL_BASE/$subdir/model.onnx_data")
-                total_mb=$(( (onnx_b + data_b) / 1024 / 1024 ))
-                if [[ -f "$MODEL_BASE/$subdir/model.onnx_data" ]]; then
-                    ok "$subdir: model.onnx + model.onnx_data (${total_mb} MB)"
+                total_mb=$(( $(_model_total_bytes "$MODEL_BASE/$subdir") / 1024 / 1024 ))
+                if data_path=$(_model_data_file "$MODEL_BASE/$subdir"); then
+                    ok "$subdir: model.onnx + $(basename "$data_path") (${total_mb} MB)"
                 else
                     ok "$subdir: model.onnx (${total_mb} MB)"
                 fi
@@ -597,11 +609,7 @@ if [[ $RUN_ONLY -eq 0 ]]; then
         echo ""
     else
         for subdir in embedder reranker generator; do
-            onnx_b=$(stat -c%s "$MODEL_BASE/$subdir/model.onnx")
-            data_b=0
-            [[ -f "$MODEL_BASE/$subdir/model.onnx_data" ]] \
-                && data_b=$(stat -c%s "$MODEL_BASE/$subdir/model.onnx_data")
-            total_mb=$(( (onnx_b + data_b) / 1024 / 1024 ))
+            total_mb=$(( $(_model_total_bytes "$MODEL_BASE/$subdir") / 1024 / 1024 ))
             ok "$subdir: ${total_mb} MB"
         done
         ok "Model stack verified  ·  Generator: $GENERATOR_DISPLAY"
