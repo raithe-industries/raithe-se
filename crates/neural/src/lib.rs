@@ -466,7 +466,13 @@ fn load_model(
             path:   dir.display().to_string(),
             reason: err.to_string(),
         })?
-        .with_optimization_level(GraphOptimizationLevel::Level1)
+        // GraphOptimizationLevel::DisableAll — every pass skipped. On first
+        // cold start the GPU-enabled ORT dylib appears to spend tens of
+        // minutes in graph rewriting even for the CPU-backed embedder
+        // (Level1 was still too heavy). DisableAll runs the model
+        // un-optimized but correctly; we regain optimization levels once
+        // we've measured what a successful cold start looks like end-to-end.
+        .with_optimization_level(GraphOptimizationLevel::DisableAll)
         .map_err(|err| Error::OrtLoad {
             path:   dir.display().to_string(),
             reason: err.to_string(),
@@ -598,7 +604,7 @@ fn probe_once(eps: Vec<ExecutionProviderDispatch>, path: &Path) -> Result<Sessio
             path:   path_str.clone(),
             reason: e.to_string(),
         })?
-        .with_optimization_level(GraphOptimizationLevel::Level1)
+        .with_optimization_level(GraphOptimizationLevel::DisableAll)
         .map_err(|e| Error::OrtLoad {
             path:   path_str.clone(),
             reason: e.to_string(),

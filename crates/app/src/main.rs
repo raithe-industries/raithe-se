@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    tracing::info!("startup [7/22] storage");
+    tracing::info!("startup · storage");
     // Step 7 — initialise Storage.
     let data_dir   = PathBuf::from("data");
     let crawl_log  = Arc::new(
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
     );
     let _ = doc_store; // wired into indexing pipeline at app layer
 
-    tracing::info!("startup [8/22] neural engines — loading 3× single-model engines; see spinner for live progress");
+    tracing::info!("startup · neural engines — loading 3× single-model engines; see spinner for live progress");
     // Step 8 — initialise split neural engines.
     //
     // Each consumer loads exactly one model; previously we loaded all
@@ -141,43 +141,43 @@ async fn main() -> Result<()> {
             .context("initialising GenerateEngine"),
     )?;
 
-    tracing::info!("startup [9/22] semantic index");
+    tracing::info!("startup · semantic index");
     // Step 9 — initialise SemanticIndex.
     let semantic   = Arc::new(Mutex::new(SemanticIndex::new(HnswConfig::default())));
 
-    tracing::info!("startup [10/22] tantivy indexer");
+    tracing::info!("startup · tantivy indexer");
     // Step 10 — initialise Indexer.
     let indexer = Arc::new(
         Indexer::new(&data_dir.join("index"), &config.indexer, Arc::clone(&metrics))
             .context("initialising Tantivy indexer")?
     );
 
-    tracing::info!("startup [11/22] link graph");
+    tracing::info!("startup · link graph");
     // Step 11 — initialise LinkGraph.
     let link_graph = Arc::new(Mutex::new(LinkGraph::new()));
 
-    tracing::info!("startup [12/22] query processor");
+    tracing::info!("startup · query processor");
     // Step 12 — initialise QueryProcessor.
     let processor = Arc::new(
         QueryProcessor::new(generate_engine, Arc::clone(&metrics))
     );
 
-    tracing::info!("startup [13/22] ranker");
+    tracing::info!("startup · ranker");
     // Step 13 — initialise Ranker.
     let ranker = Arc::new(
         Ranker::new(config.ranker.clone(), rerank_engine, Arc::clone(&metrics))
             .context("initialising ranker — check gbdt_model_path is accessible")?
     );
 
-    tracing::info!("startup [14/22] instant engine");
+    tracing::info!("startup · instant engine");
     // Step 14 — initialise InstantEngine.
     let instant = Arc::new(InstantEngine::new());
 
-    tracing::info!("startup [15/22] session store");
+    tracing::info!("startup · session store");
     // Step 15 — initialise SessionStore.
     let sessions = Arc::new(SessionStore::new(100_000, 3_600));
 
-    tracing::info!("startup [16/22] scraper + crawler");
+    tracing::info!("startup · scraper + crawler");
     // Step 16 — initialise Scraper (needed by Crawler).
     let scraper = Scraper::new(&config.scraper, Arc::clone(&metrics))
         .context("initialising HTTP scraper")?;
@@ -194,12 +194,12 @@ async fn main() -> Result<()> {
         .context("initialising crawler — check seed count and config")?
     );
 
-    tracing::info!("startup [17/22] freshness manager");
+    tracing::info!("startup · freshness manager");
     // Step 17 — initialise FreshnessManager.
     //   stale_after_ms = 24 hours.
     let freshness = Arc::new(FreshnessManager::new(86_400_000));
 
-    tracing::info!("startup [18/22] config watcher");
+    tracing::info!("startup · config watcher");
     // Step 18 — spawn config hot-reload watcher task.
     {
         let config_path = cli.config_path.clone();
@@ -209,7 +209,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    tracing::info!("startup [19/22] spawning crawler + indexing pipeline tasks");
+    tracing::info!("startup · spawning crawler + indexing pipeline tasks");
     // Step 19 — create the fetch channel, then spawn the crawler task and the
     // indexing pipeline task. The channel decouples fetch from parse/index/embed
     // so neither task blocks the other. Buffer of 64 is sufficient — the crawler
@@ -340,7 +340,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    tracing::info!("startup [20/22] spawning freshness task");
+    tracing::info!("startup · spawning freshness task");
     // Step 20 — spawn freshness task.
     {
         let freshness = Arc::clone(&freshness);
@@ -362,7 +362,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    tracing::info!("startup [21/22] binding HTTP server on {}", config.serving.bind);
+    tracing::info!("startup · binding HTTP server on {}", config.serving.bind);
     // Step 21 — bind serving HTTP server — fail clearly on port conflict.
     let doc_count = indexer.doc_count().unwrap_or(0);
     let app_state = Arc::new(AppState {
