@@ -18,7 +18,7 @@ pub mod watcher;
 
 pub use self::crawler::CrawlerConfig;
 pub use self::indexer::IndexerConfig;
-pub use self::neural::NeuralConfig;
+pub use self::neural::{NeuralConfig, Provider, Quantization};
 pub use self::ranker::RankerConfig;
 pub use self::scraper::ScraperConfig;
 pub use self::serving::ServingConfig;
@@ -54,8 +54,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Config {
     pub crawler: CrawlerConfig,
     pub indexer: IndexerConfig,
-    pub neural: NeuralConfig,
-    pub ranker: RankerConfig,
+    pub neural:  NeuralConfig,
+    pub ranker:  RankerConfig,
     pub scraper: ScraperConfig,
     pub serving: ServingConfig,
 }
@@ -76,7 +76,7 @@ impl Config {
             .merge(Env::prefixed("RAITHE__").split("__"))
             .extract()
             .map_err(|source| Error::Load {
-                path: path_str,
+                path:   path_str,
                 source: Box::new(source),
             })?;
         Ok(config)

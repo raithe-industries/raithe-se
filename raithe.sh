@@ -28,7 +28,10 @@ MODEL_BASE="$SCRIPT_DIR/data/models"
 
 ORT_VERSION="1.20.1"
 ORT_CACHE="${HOME}/.cache/ort.pyke.io"
-ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+# GPU-enabled ORT tarball: includes CUDA 12 kernels (compatible with the
+# CUDA 13 stubs driver 580+ ships), plus CPU kernels as unconditional
+# backstop for the embedder/reranker. Same filename, different build.
+ORT_TARBALL="onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz"
 ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
 
 GREEN='\033[0;32m'
@@ -126,16 +129,95 @@ ok "RAM:         ${RAM_GB} GB"
 ok "FREE DISK:   ${FREE_DISK_GB} GB"
 ok "VRAM:        ${VRAM_GB} GB (GPU present: $( [[ $HAS_GPU -eq 1 ]] && echo yes || echo no ))"
 
-GENERATOR_ID="Qwen/Qwen2.5-7B-Instruct"
-GENERATOR_DISPLAY="Qwen2.5-7B-Instruct"
-if [[ "$RAM_GB" -ge 64 && "$VRAM_GB" -ge 16 ]]; then
+# ── CUDA gate ─────────────────────────────────────────────────────────────────
+# raithe-se is a GPU-first product. The generator (7B / 14B causal-LM) is
+# unusable on CPU — a 2026 design choice. Fail loudly if the box is not
+# CUDA-capable rather than silently falling back to a 60-minute CPU load.
+if [[ $HAS_GPU -ne 1 ]]; then
+    fail "No NVIDIA GPU detected (nvidia-smi absent). raithe-se requires \
+≥4 GB of CUDA-capable VRAM. Install NVIDIA drivers or run on a GPU host."
+fi
+if [[ $VRAM_GB -lt 4 ]]; then
+    fail "VRAM too small: ${VRAM_GB} GB detected, ≥4 GB required. \
+Smallest supported tier is Qwen2.5-1.5B fp16 at ~3 GB VRAM."
+fi
+
+# Parse nvidia-smi's advertised CUDA version. Driver-bundled CUDA stubs
+# from driver 580+ report CUDA 13.0; ort 2.0.0-rc.12 is built against
+# CUDA ≥12.8, so 13.0 is a superset. We only warn on unexpected majors.
+CUDA_VERSION=$(nvidia-smi --query-gpu=driver_version,name --format=csv,noheader 2>/dev/null | head -n1 || echo "")
+NV_CUDA=$(nvidia-smi 2>/dev/null | awk -F'CUDA Version: ' '/CUDA Version:/ {print $2}' | awk '{print $1}' || echo "")
+if [[ -z "$NV_CUDA" ]]; then
+    warn "Could not parse CUDA version from nvidia-smi; proceeding anyway"
+else
+    CUDA_MAJOR="${NV_CUDA%%.*}"
+    if [[ "$CUDA_MAJOR" -lt 12 ]]; then
+        fail "CUDA ${NV_CUDA} detected. ort 2.0.0-rc.12 requires CUDA ≥12.8. \
+Upgrade NVIDIA driver to ≥535 (CUDA 12.8) or ≥575 (CUDA 13.0)."
+    fi
+    ok "CUDA:        ${NV_CUDA} (driver-bundled)"
+fi
+
+# ── Generator tier matrix ─────────────────────────────────────────────────────
+# Keyed on (VRAM, RAM). int4 (MatMulNBits) fits a 7B model in ~5 GB VRAM
+# including KV cache; used for 8–15 GB cards. fp16 for 16+ GB. All tiers
+# are CUDA, no CPU fallback (by policy).
+#
+# Embedder + reranker always run on CPU (Option A): leaves the full
+# generator budget for the generator, and embedder/reranker are fast
+# enough on CPU that GPU time isn't the bottleneck on their path.
+GENERATOR_PROVIDER="cuda"
+EMBEDDER_PROVIDER="cpu"
+RERANKER_PROVIDER="cpu"
+GENERATOR_GPU_MEM_LIMIT_BYTES=$((6 * 1024 * 1024 * 1024))    # default 6 GB
+
+if   [[ $VRAM_GB -ge 24 && $RAM_GB -ge 64 ]]; then
     GENERATOR_ID="Qwen/Qwen2.5-14B-Instruct"
     GENERATOR_DISPLAY="Qwen2.5-14B-Instruct"
-    ok "AUTO-SELECT: Qwen2.5-14B (high-accuracy)"
+    GENERATOR_QUANT="fp16"
+    GENERATOR_GPU_MEM_LIMIT_BYTES=$((20 * 1024 * 1024 * 1024))
+    TIER_LABEL="14B fp16 CUDA"
+elif [[ $VRAM_GB -ge 16 && $RAM_GB -ge 32 ]]; then
+    GENERATOR_ID="Qwen/Qwen2.5-7B-Instruct"
+    GENERATOR_DISPLAY="Qwen2.5-7B-Instruct"
+    GENERATOR_QUANT="fp16"
+    GENERATOR_GPU_MEM_LIMIT_BYTES=$((14 * 1024 * 1024 * 1024))
+    TIER_LABEL="7B fp16 CUDA"
+elif [[ $VRAM_GB -ge 8  && $RAM_GB -ge 16 ]]; then
+    GENERATOR_ID="Qwen/Qwen2.5-7B-Instruct"
+    GENERATOR_DISPLAY="Qwen2.5-7B-Instruct"
+    # Round 1: fp32 — matches existing on-disk generator; int4 conversion
+    # lands in round 2 alongside the Stage 2 quantization pipeline. When
+    # flipped to int4 here, also update Stage 2 export + add quant.txt.
+    GENERATOR_QUANT="fp32"
+    GENERATOR_GPU_MEM_LIMIT_BYTES=$((14 * 1024 * 1024 * 1024))
+    TIER_LABEL="7B fp32 CUDA (int4 pending round 2)"
+elif [[ $VRAM_GB -ge 6  && $RAM_GB -ge 16 ]]; then
+    GENERATOR_ID="Qwen/Qwen2.5-3B-Instruct"
+    GENERATOR_DISPLAY="Qwen2.5-3B-Instruct"
+    GENERATOR_QUANT="fp16"
+    GENERATOR_GPU_MEM_LIMIT_BYTES=$((5 * 1024 * 1024 * 1024))
+    TIER_LABEL="3B fp16 CUDA"
 else
-    ok "AUTO-SELECT: Qwen2.5-7B (balanced)"
+    GENERATOR_ID="Qwen/Qwen2.5-1.5B-Instruct"
+    GENERATOR_DISPLAY="Qwen2.5-1.5B-Instruct"
+    GENERATOR_QUANT="fp16"
+    GENERATOR_GPU_MEM_LIMIT_BYTES=$((3 * 1024 * 1024 * 1024))
+    TIER_LABEL="1.5B fp16 CUDA"
 fi
+
+ok "AUTO-SELECT: ${TIER_LABEL}"
 ok "CONFIRMED:   $GENERATOR_DISPLAY"
+ok "VRAM LIMIT:  $((GENERATOR_GPU_MEM_LIMIT_BYTES / 1024 / 1024 / 1024)) GB (generator session)"
+
+# Export the tier selection into the process env so raithe-app's config
+# loader (figment, prefix RAITHE__) picks them up without requiring a
+# config file rewrite on each run.
+export RAITHE__NEURAL__GENERATOR_QUANTIZATION="$GENERATOR_QUANT"
+export RAITHE__NEURAL__GENERATOR_PROVIDER="$GENERATOR_PROVIDER"
+export RAITHE__NEURAL__EMBEDDER_PROVIDER="$EMBEDDER_PROVIDER"
+export RAITHE__NEURAL__RERANKER_PROVIDER="$RERANKER_PROVIDER"
+export RAITHE__NEURAL__GENERATOR_GPU_MEM_LIMIT_BYTES="$GENERATOR_GPU_MEM_LIMIT_BYTES"
 
 # ==============================================================================
 # ORT SHARED LIBRARY — auto-download if missing
@@ -146,20 +228,41 @@ step "Locating ONNX Runtime shared library"
 ORT_SO=$(find "$ORT_CACHE" -name "libonnxruntime.so*" -not -name "*.lock" 2>/dev/null \
     | sort -V | tail -n1 || true)
 
+# Detect if the cached dylib is the CPU-only variant (from a previous
+# raithe.sh run before we switched to the GPU tarball). Signal: CPU-only
+# .so is ~15 MB; GPU .so is ~380 MB. Force re-download if the size is too
+# small, otherwise the CUDA EP registration at runtime silently no-ops.
+if [[ -n "$ORT_SO" && -f "$ORT_SO" ]]; then
+    ORT_SO_MB=$(( $(stat -c%s "$ORT_SO") / 1024 / 1024 ))
+    if [[ $ORT_SO_MB -lt 100 ]]; then
+        warn "Cached $ORT_SO is ${ORT_SO_MB} MB — likely CPU-only variant; re-downloading GPU build"
+        rm -f "$ORT_CACHE"/libonnxruntime.so*
+        ORT_SO=""
+    fi
+fi
+
 if [[ -z "$ORT_SO" ]]; then
-    warn "libonnxruntime.so not found — downloading ORT v${ORT_VERSION}"
+    warn "libonnxruntime.so (GPU) not found — downloading ORT v${ORT_VERSION}"
     mkdir -p "$ORT_CACHE"
     TMP_TAR="/tmp/${ORT_TARBALL}"
     wget -q --show-progress "$ORT_URL" -O "$TMP_TAR" \
         || fail "Failed to download ORT from $ORT_URL"
     tar -xzf "$TMP_TAR" -C /tmp
-    cp "/tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION}" \
+    cp "/tmp/onnxruntime-linux-x64-gpu-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION}" \
         "$ORT_CACHE/"
+    # GPU tarball also ships libonnxruntime_providers_cuda.so and
+    # libonnxruntime_providers_shared.so — both must sit next to the main
+    # .so so dlopen can find them at provider-registration time.
+    cp "/tmp/onnxruntime-linux-x64-gpu-${ORT_VERSION}/lib/libonnxruntime_providers_cuda.so" \
+        "$ORT_CACHE/" 2>/dev/null || true
+    cp "/tmp/onnxruntime-linux-x64-gpu-${ORT_VERSION}/lib/libonnxruntime_providers_shared.so" \
+        "$ORT_CACHE/" 2>/dev/null || true
     ln -sf "$ORT_CACHE/libonnxruntime.so.${ORT_VERSION}" \
            "$ORT_CACHE/libonnxruntime.so"
     rm -f "$TMP_TAR"
+    rm -rf "/tmp/onnxruntime-linux-x64-gpu-${ORT_VERSION}"
     ORT_SO="$ORT_CACHE/libonnxruntime.so.${ORT_VERSION}"
-    ok "ORT downloaded and cached"
+    ok "ORT (GPU) downloaded and cached"
 fi
 
 export ORT_DYLIB_PATH="$ORT_SO"

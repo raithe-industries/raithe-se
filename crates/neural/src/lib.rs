@@ -32,7 +32,7 @@ use ort::execution_providers::{
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 use raithe_common::Embedding;
-use raithe_config::NeuralConfig;
+use raithe_config::{NeuralConfig, Provider as ConfiguredProvider, Quantization};
 use raithe_metrics::Metrics;
 use thiserror::Error;
 
@@ -46,6 +46,22 @@ pub enum Error {
     Tokeniser { path: String, reason: String },
     #[error("inference error ({model}): {reason}")]
     Inference { model: String, reason: String },
+    #[error(
+        "requested provider '{requested}' unavailable for '{path}' — \
+         CUDA toolkit ≥12.8 + cuDNN ≥9.19 required for CUDA EP, \
+         launch via raithe.sh which verifies hardware before start"
+    )]
+    ProviderUnavailable { requested: &'static str, path: String },
+    #[error(
+        "quantization mismatch in '{path}': configured '{configured}' but \
+         model on disk was exported as '{on_disk}' — re-run raithe.sh to \
+         re-export, or adjust RAITHE__NEURAL__GENERATOR_QUANTIZATION"
+    )]
+    QuantizationMismatch {
+        path:       String,
+        configured: &'static str,
+        on_disk:    String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -100,15 +116,22 @@ pub struct EmbedEngine {
 }
 
 impl EmbedEngine {
-    /// Probes execution providers against the embedder model and loads it.
+    /// Loads the embedder per the engine's configured provider.
+    ///
+    /// Default is CPU (Option A in the tier design) so the generator owns
+    /// VRAM on 8 GB-class GPUs. `Auto` runs the full probe chain.
     pub fn new(config: &NeuralConfig, metrics: Arc<Metrics>) -> Result<Self> {
         validate_ort_dylib(config)?;
 
         let model_path = config.embedder_dir.join("model.onnx");
-        let provider   = probe_best_provider(&model_path);
+        let provider   = resolve_provider(
+            config.embedder_provider,
+            &model_path,
+            &config.embedder_dir,
+        )?;
         record_provider_gauge(&metrics, provider);
 
-        let handle = load_model(&config.embedder_dir, provider)?;
+        let handle = load_model(&config.embedder_dir, provider, None)?;
         Ok(Self { handle, provider, _metrics: metrics })
     }
 
@@ -165,15 +188,21 @@ pub struct RerankEngine {
 }
 
 impl RerankEngine {
-    /// Probes execution providers against the reranker model and loads it.
+    /// Loads the reranker per the engine's configured provider.
+    ///
+    /// Default is CPU (Option A) for the same reason as `EmbedEngine`.
     pub fn new(config: &NeuralConfig, metrics: Arc<Metrics>) -> Result<Self> {
         validate_ort_dylib(config)?;
 
         let model_path = config.reranker_dir.join("model.onnx");
-        let provider   = probe_best_provider(&model_path);
+        let provider   = resolve_provider(
+            config.reranker_provider,
+            &model_path,
+            &config.reranker_dir,
+        )?;
         record_provider_gauge(&metrics, provider);
 
-        let handle = load_model(&config.reranker_dir, provider)?;
+        let handle = load_model(&config.reranker_dir, provider, None)?;
         Ok(Self { handle, provider, metrics })
     }
 
@@ -231,15 +260,27 @@ pub struct GenerateEngine {
 }
 
 impl GenerateEngine {
-    /// Probes execution providers against the generator model and loads it.
+    /// Loads the generator per the engine's configured provider and
+    /// quantization. Verifies the `quant.txt` sidecar matches the
+    /// configured `generator_quantization`; mismatch fails loudly rather
+    /// than silently loading the wrong format.
     pub fn new(config: &NeuralConfig, metrics: Arc<Metrics>) -> Result<Self> {
         validate_ort_dylib(config)?;
+        verify_quantization(
+            &config.generator_dir,
+            config.generator_quantization,
+        )?;
 
         let model_path = config.generator_dir.join("model.onnx");
-        let provider   = probe_best_provider(&model_path);
+        let provider   = resolve_provider(
+            config.generator_provider,
+            &model_path,
+            &config.generator_dir,
+        )?;
         record_provider_gauge(&metrics, provider);
 
-        let handle = load_model(&config.generator_dir, provider)?;
+        let gpu_limit = Some(config.generator_gpu_mem_limit_bytes);
+        let handle    = load_model(&config.generator_dir, provider, gpu_limit)?;
         Ok(Self {
             handle,
             provider,
@@ -318,6 +359,67 @@ fn validate_ort_dylib(config: &NeuralConfig) -> Result<()> {
     Ok(())
 }
 
+/// Resolves a configured provider intent into a concrete runtime provider.
+///
+/// - `Auto`: runs `probe_best_provider` to pick the first working GPU EP,
+///   falling back to CPU.
+/// - `Cuda`: probes CUDA explicitly; returns `ProviderUnavailable` if the
+///   probe fails so misconfiguration is surfaced rather than silently
+///   downgraded to CPU (this product is GPU-first by policy).
+/// - `Cpu`: returns CPU unconditionally.
+fn resolve_provider(
+    configured: ConfiguredProvider,
+    model_path: &Path,
+    dir:        &Path,
+) -> Result<ExecutionProvider> {
+    const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+    match configured {
+        ConfiguredProvider::Auto => Ok(probe_best_provider(model_path)),
+        ConfiguredProvider::Cpu  => Ok(ExecutionProvider::Cpu),
+        ConfiguredProvider::Cuda => {
+            if probe_provider(ExecutionProvider::Cuda, model_path, PROBE_BUDGET) {
+                Ok(ExecutionProvider::Cuda)
+            } else {
+                Err(Error::ProviderUnavailable {
+                    requested: "cuda",
+                    path:      dir.display().to_string(),
+                })
+            }
+        }
+    }
+}
+
+/// Reads the `quant.txt` sidecar from `dir` and checks it matches `want`.
+///
+/// Sidecar format: a single ascii token, one of `fp32` / `fp16` / `int4`,
+/// optionally followed by a newline. Absent sidecar is treated as `fp32`
+/// so existing pre-sidecar installations keep working without re-export.
+fn verify_quantization(dir: &Path, want: Quantization) -> Result<()> {
+    let sidecar = dir.join("quant.txt");
+    let on_disk = if sidecar.exists() {
+        std::fs::read_to_string(&sidecar)
+            .map_err(|err| Error::OrtLoad {
+                path:   sidecar.display().to_string(),
+                reason: format!("read quant.txt: {err}"),
+            })?
+            .trim()
+            .to_owned()
+    } else {
+        String::from("fp32")
+    };
+
+    if on_disk == want.label() {
+        Ok(())
+    } else {
+        Err(Error::QuantizationMismatch {
+            path:       dir.display().to_string(),
+            configured: want.label(),
+            on_disk,
+        })
+    }
+}
+
 /// Records the selected EP in the Prometheus gauge — selected = 1.0, others = 0.0.
 fn record_provider_gauge(metrics: &Metrics, provider: ExecutionProvider) {
     for label in &["cuda", "directml", "coreml", "cpu"] {
@@ -331,15 +433,23 @@ fn record_provider_gauge(metrics: &Metrics, provider: ExecutionProvider) {
 
 /// Loads a model from `dir`, resolving `model.onnx` and `tokenizer.json`.
 ///
-/// The selected `provider` must already have survived `probe_best_provider`.
-/// Both `model.onnx` and `tokenizer.json` must be present in `dir`; missing
-/// either returns `Error::ModelNotFound`.
+/// The selected `provider` must already have survived `resolve_provider`.
+/// Both `model.onnx` and `tokenizer.json` must be present in `dir`;
+/// missing either returns `Error::ModelNotFound`.
 ///
 /// Graph optimization is pinned to `Level1` (basic, portable passes only).
 /// Level3 runs expensive layout-transform passes that dominate cold start
 /// on 7B+ decoder models; `Level1` preserves correctness and avoids the
-/// pass cost. Upgrade individually per-engine later if benchmarks justify.
-fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
+/// pass cost.
+///
+/// `gpu_mem_limit` caps VRAM allocation when provider is CUDA; `None`
+/// leaves ORT's default (consume as much as needed up to device capacity).
+/// Only honoured on CUDA — other EPs ignore it.
+fn load_model(
+    dir:           &Path,
+    provider:      ExecutionProvider,
+    gpu_mem_limit: Option<u64>,
+) -> Result<ModelHandle> {
     let model_path     = dir.join("model.onnx");
     let tokeniser_path = dir.join("tokenizer.json");
 
@@ -349,7 +459,7 @@ fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
         });
     }
 
-    let eps: Vec<ExecutionProviderDispatch> = execution_providers_for(provider);
+    let eps: Vec<ExecutionProviderDispatch> = execution_providers_for(provider, gpu_mem_limit);
 
     let session = Session::builder()
         .map_err(|err| Error::OrtLoad {
@@ -383,7 +493,18 @@ fn load_model(dir: &Path, provider: ExecutionProvider) -> Result<ModelHandle> {
 
 /// Returns the list of execution provider dispatches for the selected
 /// provider, always terminated with CPU as the unconditional backstop.
-fn execution_providers_for(provider: ExecutionProvider) -> Vec<ExecutionProviderDispatch> {
+///
+/// `_gpu_mem_limit` is currently unused — the `ort` crate's CUDA builder
+/// surface in 2.0.0-rc.12 does not expose a stable Rust method to set
+/// `gpu_mem_limit`. The NeuralConfig field is threaded through so the
+/// plumbing is ready to wire up once the API is confirmed in a follow-up
+/// (tracked internally). In the meantime CUDA EP uses its defaults, which
+/// grow the arena as needed up to device capacity.
+#[allow(unused_variables)]
+fn execution_providers_for(
+    provider:       ExecutionProvider,
+    _gpu_mem_limit: Option<u64>,
+) -> Vec<ExecutionProviderDispatch> {
     match provider {
         ExecutionProvider::Cuda     => vec![
             CUDAExecutionProvider::default().build(),
@@ -448,7 +569,7 @@ fn probe_provider(
     let (tx, rx) = std::sync::mpsc::channel::<bool>();
 
     std::thread::spawn(move || {
-        let eps = execution_providers_for(candidate);
+        let eps = execution_providers_for(candidate, None);
         let ok  = probe_once(eps, &path).is_ok();
         let _ = tx.send(ok);
     });
@@ -751,16 +872,43 @@ mod tests {
     #[test]
     fn model_not_found_when_dir_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let err = load_model(dir.path(), ExecutionProvider::Cpu).unwrap_err();
+        let err = load_model(dir.path(), ExecutionProvider::Cpu, None).unwrap_err();
         assert!(matches!(err, Error::ModelNotFound { .. }));
     }
 
     #[test]
     fn model_not_found_returns_err_variant() {
         let dir = tempfile::tempdir().unwrap();
-        let result = load_model(dir.path(), ExecutionProvider::Cpu);
+        let result = load_model(dir.path(), ExecutionProvider::Cpu, None);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::ModelNotFound { .. }));
+    }
+
+    #[test]
+    fn quant_label_roundtrip() {
+        assert_eq!(Quantization::Fp32.label(), "fp32");
+        assert_eq!(Quantization::Fp16.label(), "fp16");
+        assert_eq!(Quantization::Int4.label(), "int4");
+    }
+
+    #[test]
+    fn verify_quantization_missing_sidecar_accepts_fp32() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(verify_quantization(dir.path(), Quantization::Fp32).is_ok());
+    }
+
+    #[test]
+    fn verify_quantization_missing_sidecar_rejects_int4() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = verify_quantization(dir.path(), Quantization::Int4).unwrap_err();
+        assert!(matches!(err, Error::QuantizationMismatch { .. }));
+    }
+
+    #[test]
+    fn verify_quantization_matches_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("quant.txt"), "int4\n").unwrap();
+        assert!(verify_quantization(dir.path(), Quantization::Int4).is_ok());
     }
 
     #[test]
