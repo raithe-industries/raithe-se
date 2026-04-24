@@ -17,7 +17,7 @@ use raithe_common::{DocumentId, ParsedQuery, RawHit, Url};
 use raithe_config::RankerConfig;
 use raithe_linkgraph::PageRankScores;
 use raithe_metrics::Metrics;
-use raithe_neural::NeuralEngine;
+use raithe_neural::RerankEngine;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -50,18 +50,18 @@ pub type Result<T> = std::result::Result<T, Error>;
 ///   4  query_tokens  — number of tokens in the parsed query
 #[derive(Clone, Debug)]
 pub struct FeatureVector {
-    pub bm25_score: f32,
-    pub pagerank: f32,
-    pub title_len: f32,
-    pub snippet_len: f32,
+    pub bm25_score:   f32,
+    pub pagerank:     f32,
+    pub title_len:    f32,
+    pub snippet_len:  f32,
     pub query_tokens: f32,
 }
 
 impl FeatureVector {
     pub(crate) fn from_hit(hit: &RawHit, pagerank: f32, query_token_count: usize) -> Self {
-        let bm25_score = hit.score;
-        let title_len = hit.title.len() as f32;
-        let snippet_len = hit.snippet.len() as f32;
+        let bm25_score   = hit.score;
+        let title_len    = hit.title.len() as f32;
+        let snippet_len  = hit.snippet.len() as f32;
         let query_tokens = query_token_count as f32;
         Self {
             bm25_score,
@@ -126,9 +126,9 @@ impl GbdtModel {
         }
 
         let path_str = path.display().to_string();
-        let gbdt =
-            GBDT::load_model(path_str.as_str()).map_err(|err: GbdtError| Error::ModelLoad {
-                path: path_str,
+        let gbdt = GBDT::load_model(path_str.as_str())
+            .map_err(|err: GbdtError| Error::ModelLoad {
+                path:   path_str,
                 reason: err.to_string(),
             })?;
 
@@ -148,7 +148,7 @@ impl GbdtModel {
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| Error::ModelSave {
-                path: path.display().to_string(),
+                path:   path.display().to_string(),
                 reason: err.to_string(),
             })?;
         }
@@ -158,14 +158,14 @@ impl GbdtModel {
             .map(|s| Data::new_training_data(s.features.as_vec(), 1.0, s.label, None))
             .collect();
 
-        let cfg = gbdt_config(300);
+        let cfg      = gbdt_config(300);
         let mut gbdt = GBDT::new(&cfg);
         gbdt.fit(&mut training_data);
 
         let path_str = path.display().to_string();
         gbdt.save_model(path_str.as_str())
             .map_err(|err: GbdtError| Error::ModelSave {
-                path: path_str,
+                path:   path_str,
                 reason: err.to_string(),
             })?;
 
@@ -179,15 +179,12 @@ impl GbdtModel {
     fn predict(&self, features: &FeatureVector) -> f32 {
         let inner = match &self.inner {
             Some(g) => g,
-            None => return features.bm25_score,
+            None    => return features.bm25_score,
         };
 
         let test_data: DataVec = vec![Data::new_test_data(features.as_vec(), None)];
         let predictions = inner.predict(&test_data);
-        predictions
-            .into_iter()
-            .next()
-            .unwrap_or(features.bm25_score)
+        predictions.into_iter().next().unwrap_or(features.bm25_score)
     }
 
     fn is_trained(&self) -> bool {
@@ -219,32 +216,32 @@ fn gbdt_config(tree_count: usize) -> GbdtConfig {
 /// A fully ranked search result, produced after all three pipeline phases.
 #[derive(Clone, Debug)]
 pub struct RankedResult {
-    pub id: DocumentId,
-    pub url: Url,
+    pub id:           DocumentId,
+    pub url:          Url,
     /// Final composite score after all active phases.
-    pub score: f32,
+    pub score:        f32,
     /// BM25F score from Phase 1.
-    pub bm25_score: f32,
+    pub bm25_score:   f32,
     /// GBDT LambdaMART score from Phase 2.
     /// Equals `bm25_score` when no trained model is loaded.
-    pub gbdt_score: f32,
+    pub gbdt_score:   f32,
     /// BGE cross-encoder score from Phase 3.
     /// 0.0 for candidates outside the top-k window.
     pub rerank_score: f32,
-    pub snippet: String,
-    pub title: String,
+    pub snippet:      String,
+    pub title:        String,
 }
 
 // ── Ranker ────────────────────────────────────────────────────────────────────
 
 /// Three-phase ranking pipeline.
 ///
-/// `NeuralEngine` and `GbdtModel` are held behind `Mutex` because their
+/// `RerankEngine` and `GbdtModel` are held behind `Mutex` because their
 /// mutable methods are called through the `&self` interface on `Ranker`.
 pub struct Ranker {
-    config: RankerConfig,
-    gbdt: Mutex<GbdtModel>,
-    neural: Mutex<NeuralEngine>,
+    config:   RankerConfig,
+    gbdt:     Mutex<GbdtModel>,
+    neural:   Mutex<RerankEngine>,
     _metrics: Arc<Metrics>,
 }
 
@@ -255,10 +252,14 @@ impl Ranker {
     /// A missing model file is not an error — Phase 2 degrades to BM25F
     /// ordering until `Ranker::train` is called with relevance labels.
     /// Returns `Error::ModelLoad` only if a file exists but is corrupt.
-    pub fn new(config: RankerConfig, neural: NeuralEngine, metrics: Arc<Metrics>) -> Result<Self> {
-        let gbdt = GbdtModel::load(&config.gbdt_model_path)?;
-        let gbdt = Mutex::new(gbdt);
-        let neural = Mutex::new(neural);
+    pub fn new(
+        config:  RankerConfig,
+        neural:  RerankEngine,
+        metrics: Arc<Metrics>,
+    ) -> Result<Self> {
+        let gbdt     = GbdtModel::load(&config.gbdt_model_path)?;
+        let gbdt     = Mutex::new(gbdt);
+        let neural   = Mutex::new(neural);
         let _metrics = metrics;
         Ok(Self {
             config,
@@ -270,7 +271,10 @@ impl Ranker {
 
     /// Returns `true` when a trained GBDT model is loaded.
     pub fn is_gbdt_trained(&self) -> bool {
-        self.gbdt.lock().map(|g| g.is_trained()).unwrap_or(false)
+        self.gbdt
+            .lock()
+            .map(|g| g.is_trained())
+            .unwrap_or(false)
     }
 
     /// Trains the Phase 2 GBDT model on `samples` and persists it.
@@ -292,8 +296,8 @@ impl Ranker {
     /// Results are returned sorted by final score descending.
     pub fn rank(
         &self,
-        hits: Vec<RawHit>,
-        query: &ParsedQuery,
+        hits:      Vec<RawHit>,
+        query:     &ParsedQuery,
         pageranks: &PageRankScores,
     ) -> Result<Vec<RankedResult>> {
         if hits.is_empty() {
@@ -307,18 +311,20 @@ impl Ranker {
             let gbdt = self.gbdt.lock().map_err(|_| Error::LockPoisoned)?;
             hits.into_iter()
                 .map(|hit| {
-                    let pagerank = pageranks.get(&hit.id).copied().unwrap_or(0.0);
-                    let features = FeatureVector::from_hit(&hit, pagerank, query_token_count);
+                    let pagerank   = pageranks.get(&hit.id).copied().unwrap_or(0.0);
+                    let features   = FeatureVector::from_hit(&hit, pagerank, query_token_count);
                     let gbdt_score = gbdt.predict(&features);
                     (hit, gbdt_score)
                 })
                 .collect()
         };
 
-        scored.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|(_, a), (_, b)| {
+            b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // ── Phase 3: Neural cross-encoder over top-k ──────────────────────
-        let top_k = self.config.reranker_top_k.min(scored.len());
+        let top_k     = self.config.reranker_top_k.min(scored.len());
         let query_str = query.rewritten.as_str();
         let candidates: Vec<&str> = scored[..top_k]
             .iter()
@@ -329,9 +335,7 @@ impl Ranker {
             let mut engine = self.neural.lock().map_err(|_| Error::LockPoisoned)?;
             engine
                 .rerank(query_str, &candidates)
-                .map_err(|err| Error::Neural {
-                    reason: err.to_string(),
-                })?
+                .map_err(|err| Error::Neural { reason: err.to_string() })?
         };
 
         // ── Assemble final results ─────────────────────────────────────────
@@ -342,10 +346,10 @@ impl Ranker {
                 let rerank_score = rerank_scores.get(i).copied().unwrap_or(0.0);
                 let score = if i < top_k { rerank_score } else { gbdt_score };
                 let bm25_score = hit.score;
-                let id = hit.id;
-                let url = hit.url;
-                let snippet = hit.snippet;
-                let title = hit.title;
+                let id         = hit.id;
+                let url        = hit.url;
+                let snippet    = hit.snippet;
+                let title      = hit.title;
                 RankedResult {
                     id,
                     url,
@@ -360,9 +364,7 @@ impl Ranker {
             .collect();
 
         results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         Ok(results)
@@ -378,24 +380,21 @@ mod tests {
 
     fn make_hit(id: u64, score: f32) -> RawHit {
         RawHit {
-            id: DocumentId::new(id),
-            url: Url::parse("https://example.com/").unwrap(),
+            id:      DocumentId::new(id),
+            url:     Url::parse("https://example.com/").unwrap(),
             score,
             snippet: String::from("example snippet for ranking tests"),
-            title: String::from("Example Title"),
+            title:   String::from("Example Title"),
         }
     }
 
     fn make_samples(n: u64) -> Vec<TrainingSample> {
         (1..=n)
             .map(|i| {
-                let hit = make_hit(i, i as f32 * 0.1);
-                let fv = FeatureVector::from_hit(&hit, i as f32 * 0.01, 3);
+                let hit   = make_hit(i, i as f32 * 0.1);
+                let fv    = FeatureVector::from_hit(&hit, i as f32 * 0.01, 3);
                 let label = if i > n / 2 { 1.0 } else { 0.0 };
-                TrainingSample {
-                    features: fv,
-                    label,
-                }
+                TrainingSample { features: fv, label }
             })
             .collect()
     }
@@ -403,45 +402,45 @@ mod tests {
     #[test]
     fn feature_vector_fields() {
         let hit = make_hit(1, 3.14);
-        let fv = FeatureVector::from_hit(&hit, 0.5, 3);
+        let fv  = FeatureVector::from_hit(&hit, 0.5, 3);
         assert!((fv.bm25_score - 3.14).abs() < 1e-5);
-        assert!((fv.pagerank - 0.5).abs() < 1e-5);
+        assert!((fv.pagerank   - 0.5 ).abs() < 1e-5);
         assert_eq!(fv.query_tokens as usize, 3);
     }
 
     #[test]
     fn feature_vec_has_five_elements() {
         let hit = make_hit(1, 1.0);
-        let fv = FeatureVector::from_hit(&hit, 0.3, 4);
+        let fv  = FeatureVector::from_hit(&hit, 0.3, 4);
         assert_eq!(fv.as_vec().len(), 5);
     }
 
     #[test]
     fn untrained_model_returns_bm25() {
         let model = GbdtModel::untrained();
-        let hit = make_hit(1, 2.71);
-        let fv = FeatureVector::from_hit(&hit, 0.0, 1);
+        let hit   = make_hit(1, 2.71);
+        let fv    = FeatureVector::from_hit(&hit, 0.0, 1);
         assert!((model.predict(&fv) - 2.71).abs() < 1e-5);
         assert!(!model.is_trained());
     }
 
     #[test]
     fn train_and_predict() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("gbdt.model");
+        let dir   = tempfile::tempdir().unwrap();
+        let path  = dir.path().join("gbdt.model");
         let mut model = GbdtModel::untrained();
         model.train_and_save(&make_samples(20), &path).unwrap();
         assert!(model.is_trained());
         assert!(path.exists());
         let hit = make_hit(5, 0.5);
-        let fv = FeatureVector::from_hit(&hit, 0.05, 3);
-        let _ = model.predict(&fv);
+        let fv  = FeatureVector::from_hit(&hit, 0.05, 3);
+        let _   = model.predict(&fv);
     }
 
     #[test]
     fn load_saved_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("gbdt.model");
+        let dir   = tempfile::tempdir().unwrap();
+        let path  = dir.path().join("gbdt.model");
         let mut model = GbdtModel::untrained();
         model.train_and_save(&make_samples(20), &path).unwrap();
         let loaded = GbdtModel::load(&path).unwrap();
@@ -450,7 +449,7 @@ mod tests {
 
     #[test]
     fn missing_model_file_gives_untrained() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir  = tempfile::tempdir().unwrap();
         let path = dir.path().join("does_not_exist.model");
         let model = GbdtModel::load(&path).unwrap();
         assert!(!model.is_trained());
@@ -458,8 +457,8 @@ mod tests {
 
     #[test]
     fn empty_samples_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("gbdt.model");
+        let dir   = tempfile::tempdir().unwrap();
+        let path  = dir.path().join("gbdt.model");
         let mut model = GbdtModel::untrained();
         assert!(model.train_and_save(&[], &path).is_err());
     }

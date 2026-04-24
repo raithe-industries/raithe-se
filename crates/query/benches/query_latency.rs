@@ -11,7 +11,7 @@ use std::sync::Arc;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use raithe_config::NeuralConfig;
 use raithe_metrics::Metrics;
-use raithe_neural::NeuralEngine;
+use raithe_neural::GenerateEngine;
 use raithe_query::QueryProcessor;
 
 fn make_metrics() -> Arc<Metrics> {
@@ -28,28 +28,29 @@ fn bench_process_latency(c: &mut Criterion) {
     group.sampling_mode(criterion::SamplingMode::Flat);
     group.sample_size(50);
 
-    let metrics = make_metrics();
-    let neural = NeuralEngine::new(&NeuralConfig::default(), Arc::clone(&metrics))
-        .expect("internal error: NeuralEngine init failed — models must be present");
+    let metrics   = make_metrics();
+    let neural    = GenerateEngine::new(&NeuralConfig::default(), Arc::clone(&metrics))
+        .expect("internal error: GenerateEngine init failed — models must be present");
     let processor = QueryProcessor::new(neural, Arc::clone(&metrics));
 
     let queries = [
-        ("short", "rust"),
+        ("short",  "rust"),
         ("medium", "fast safe systems programming language"),
-        (
-            "long",
-            "what is the best way to learn rust for backend web development in 2026",
-        ),
+        ("long",   "what is the best way to learn rust for backend web development in 2026"),
     ];
 
     for (label, raw) in &queries {
-        group.bench_with_input(BenchmarkId::new("process", label), raw, |b, raw| {
-            b.iter(|| {
-                processor
-                    .process(raw)
-                    .expect("internal error: query process failed in bench")
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("process", label),
+            raw,
+            |b, raw| {
+                b.iter(|| {
+                    processor
+                        .process(raw)
+                        .expect("internal error: query process failed in bench")
+                });
+            },
+        );
     }
 
     group.finish();

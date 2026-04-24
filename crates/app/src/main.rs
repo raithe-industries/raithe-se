@@ -19,7 +19,7 @@ use raithe_indexer::Indexer;
 use raithe_instant::InstantEngine;
 use raithe_linkgraph::LinkGraph;
 use raithe_metrics::Metrics;
-use raithe_neural::NeuralEngine;
+use raithe_neural::{EmbedEngine, GenerateEngine, RerankEngine};
 use raithe_parser::Parser;
 use raithe_query::QueryProcessor;
 use raithe_ranker::Ranker;
@@ -112,30 +112,33 @@ async fn main() -> Result<()> {
     );
     let _ = doc_store; // wired into indexing pipeline at app layer
 
-    tracing::info!("startup [8/22] neural engine — loading 3× instances; see spinner for live progress");
-    // Step 8 — initialise NeuralEngine instances.
-    // Three independent instances — NeuralEngine is not Clone:
-    //   neural_for_query  → QueryProcessor (generate)
-    //   neural_for_rank   → Ranker (rerank)
-    //   neural_for_index  → indexing pipeline (embed)
-    // First-load cost is dominated by the generator's 30 GB fp32 weights
-    // being read from disk + ORT graph-optimization passes. Each instance
-    // pays that cost independently. Elapsed-time spinner surfaces real
-    // progress; no fabricated ETA.
-    let neural_for_query = load_with_spinner(
-        "neural [1/3] query-processor",
-        || NeuralEngine::new(&config.neural, Arc::clone(&metrics))
-            .context("initialising NeuralEngine for query processor (run ./raithe.sh)"),
+    tracing::info!("startup [8/22] neural engines — loading 3× single-model engines; see spinner for live progress");
+    // Step 8 — initialise split neural engines.
+    //
+    // Each consumer loads exactly one model; previously we loaded all
+    // three in each of three NeuralEngine instances, which read the
+    // generator's ~30 GB of weights 3× at startup.
+    //
+    //   embed_engine    → indexing pipeline (BGE-large-en-v1.5,       ~1.3 GB)
+    //   rerank_engine   → Ranker            (BGE-reranker-large,      ~2.1 GB)
+    //   generate_engine → QueryProcessor    (Qwen2.5-{7B,14B}-Instruct, 14–28 GB)
+    //
+    // No synthetic ETA. The spinner reports real elapsed time and
+    // freezes when the load returns. Generate dominates cold start.
+    let embed_engine = load_with_spinner(
+        "neural [1/3] embedder",
+        || EmbedEngine::new(&config.neural, Arc::clone(&metrics))
+            .context("initialising EmbedEngine (run ./raithe.sh if models missing)"),
     )?;
-    let neural_for_rank  = load_with_spinner(
-        "neural [2/3] ranker",
-        || NeuralEngine::new(&config.neural, Arc::clone(&metrics))
-            .context("initialising NeuralEngine for ranker"),
+    let rerank_engine = load_with_spinner(
+        "neural [2/3] reranker",
+        || RerankEngine::new(&config.neural, Arc::clone(&metrics))
+            .context("initialising RerankEngine"),
     )?;
-    let neural_for_index = load_with_spinner(
-        "neural [3/3] indexer",
-        || NeuralEngine::new(&config.neural, Arc::clone(&metrics))
-            .context("initialising NeuralEngine for indexing pipeline"),
+    let generate_engine = load_with_spinner(
+        "neural [3/3] generator",
+        || GenerateEngine::new(&config.neural, Arc::clone(&metrics))
+            .context("initialising GenerateEngine"),
     )?;
 
     tracing::info!("startup [9/22] semantic index");
@@ -156,13 +159,13 @@ async fn main() -> Result<()> {
     tracing::info!("startup [12/22] query processor");
     // Step 12 — initialise QueryProcessor.
     let processor = Arc::new(
-        QueryProcessor::new(neural_for_query, Arc::clone(&metrics))
+        QueryProcessor::new(generate_engine, Arc::clone(&metrics))
     );
 
     tracing::info!("startup [13/22] ranker");
     // Step 13 — initialise Ranker.
     let ranker = Arc::new(
-        Ranker::new(config.ranker.clone(), neural_for_rank, Arc::clone(&metrics))
+        Ranker::new(config.ranker.clone(), rerank_engine, Arc::clone(&metrics))
             .context("initialising ranker — check gbdt_model_path is accessible")?
     );
 
@@ -232,7 +235,7 @@ async fn main() -> Result<()> {
         // §6.1 data flow:
         //   FetchResult → Parser::parse() → ParsedDocument
         //     ├─► Indexer::add(doc)
-        //     ├─► NeuralEngine::embed(body_text) → SemanticIndex::insert(id, embedding)
+        //     ├─► EmbedEngine::embed(body_text) → SemanticIndex::insert(id, embedding)
         //     ├─► LinkGraph::add_edge(src, dst) for each outlink
         //     └─► Crawler::enqueue_outlinks(outlinks, depth + 1)
         {
@@ -241,7 +244,7 @@ async fn main() -> Result<()> {
             let semantic       = Arc::clone(&semantic);
             let link_graph     = Arc::clone(&link_graph);
             let max_depth      = config.crawler.max_depth;
-            let mut neural     = neural_for_index;
+            let mut neural     = embed_engine;
             let parser         = Parser::new();
 
             // URL → DocumentId resolver for link-graph edge construction.
@@ -429,37 +432,58 @@ fn load_seeds(path: Option<&Path>, _config: &Config) -> Result<Vec<Url>> {
 
 // ── Load progress spinner ─────────────────────────────────────────────────────
 //
-// Wraps a synchronous, long-running load step with an animated progress
-// spinner that shows a bouncing asterisk inside brackets (systemd-style)
-// plus elapsed wall-clock time. The closure runs on the main thread;
-// indicatif's `enable_steady_tick` spawns a separate thread that repaints
-// the spinner at a fixed cadence so the main thread can block inside
-// `work` without freezing the animation.
+// Wraps a long-running synchronous load with a linear left→right progress
+// indicator modelled on the systemd boot-progress display: a short gradient
+// of asterisks travels across a fixed-width bracket, falls off the right
+// edge, then wraps back to the left. The closure runs on the caller's
+// thread; indicatif's `enable_steady_tick` spawns a repaint thread so the
+// animation keeps running while the load blocks.
 //
-// No synthetic ETA is reported — only real elapsed time, and only the
-// actual duration the step took once finished. This is deliberate: the
-// previous `30-120s on CPU` estimate was not grounded in measurement.
+// On success the spinner line is *cleared* and replaced by a single
+// "✓ <label> — ready in <elapsed>" confirmation, matching the green ✓
+// style used by raithe.sh's validation output. On failure the bar is
+// abandoned in place and the error propagates to main for the standard
+// anyhow unwind.
+//
+// No cutoff, no synthetic ETA. The user's explicit position: cold start
+// may take hours on slow hardware, and that's acceptable — what matters
+// is honest live feedback that something is still making progress.
 fn load_with_spinner<T, F>(label: &str, work: F) -> Result<T>
 where
     F: FnOnce() -> Result<T>,
 {
-    // 12-frame bounce cycle + terminal "ok" frame rendered after finish.
-    // Final frame in the slice is what indicatif leaves on screen when
-    // `finish_with_message` is called.
+    // Linear sweep. 8-cell bracket, 3-asterisk gradient travelling
+    // left-to-right, wrapping off the right edge and reappearing on
+    // the left. Matches the Linux systemd progress indicator shape.
+    //
+    // Frames, in order:
+    //   position  0: [***     ]      ← gradient entirely on left
+    //   position  1: [ ***    ]
+    //   position  2: [  ***   ]
+    //   position  3: [   ***  ]
+    //   position  4: [    *** ]
+    //   position  5: [     ***]      ← gradient entirely on right
+    //   position  6: [      **]      ← one cell falls off
+    //   position  7: [       *]      ← two cells fall off
+    //   position  8: [        ]      ← entirely off-screen (brief pause)
+    //   position  9: [*       ]      ← leading edge re-enters from left
+    //   position 10: [**      ]
+    //   (cycle restarts at position 0)
     const TICK_STRINGS: &[&str] = &[
-        "[*      ]",
-        "[ *     ]",
-        "[  *    ]",
-        "[   *   ]",
-        "[    *  ]",
-        "[     * ]",
-        "[      *]",
-        "[     * ]",
-        "[    *  ]",
-        "[   *   ]",
-        "[  *    ]",
-        "[ *     ]",
-        "[  ok   ]",
+        "[***     ]",
+        "[ ***    ]",
+        "[  ***   ]",
+        "[   ***  ]",
+        "[    *** ]",
+        "[     ***]",
+        "[      **]",
+        "[       *]",
+        "[        ]",
+        "[*       ]",
+        "[**      ]",
+        "[        ]",   // final frame when pb.finish_and_clear() is called;
+                        // line is cleared before this is rendered, so it's
+                        // effectively a no-op placeholder.
     ];
 
     let pb = ProgressBar::new_spinner();
@@ -469,15 +493,22 @@ where
             .tick_strings(TICK_STRINGS),
     );
     pb.set_message(label.to_string());
-    pb.enable_steady_tick(Duration::from_millis(100));
+    pb.enable_steady_tick(Duration::from_millis(120));
 
     let started = Instant::now();
     let result  = work();
     let elapsed = started.elapsed();
 
     match &result {
-        Ok(_)  => pb.finish_with_message(format!("{label} — ready in {elapsed:.1?}")),
-        Err(e) => pb.abandon_with_message(format!("{label} — FAILED in {elapsed:.1?}: {e}")),
+        Ok(_) => {
+            pb.finish_and_clear();
+            // Green ✓ to match raithe.sh's success style. Writes to
+            // stderr so it doesn't tangle with stdout tracing JSON.
+            eprintln!("  \x1b[0;32m✓\x1b[0m {label} — ready in {elapsed:.1?}");
+        }
+        Err(e) => {
+            pb.abandon_with_message(format!("{label} — FAILED in {elapsed:.1?}: {e}"));
+        }
     }
     result
 }

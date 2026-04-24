@@ -5,7 +5,7 @@
 
 /// A 1024-dimensional dense embedding vector.
 ///
-/// Produced by `NeuralEngine::embed()` and consumed by `SemanticIndex`.
+/// Produced by `EmbedEngine::embed()` and consumed by `SemanticIndex`.
 /// The dimensionality matches BAAI/bge-large-en-v1.5 (feature-extraction).
 #[derive(Clone, Debug)]
 pub struct Embedding {
@@ -31,12 +31,7 @@ impl Embedding {
     ///
     /// Returns 0.0 if either vector has zero magnitude.
     pub fn cosine_similarity(&self, other: &Self) -> f32 {
-        let dot: f32 = self
-            .values
-            .iter()
-            .zip(other.values.iter())
-            .map(|(a, b)| a * b)
-            .sum();
+        let dot: f32 = self.values.iter().zip(other.values.iter()).map(|(a, b)| a * b).sum();
         let mag_a: f32 = self.values.iter().map(|v| v * v).sum::<f32>().sqrt();
         let mag_b: f32 = other.values.iter().map(|v| v * v).sum::<f32>().sqrt();
         if mag_a == 0.0 || mag_b == 0.0 {
