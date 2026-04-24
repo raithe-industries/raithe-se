@@ -33,3 +33,4 @@ raithe-serving    = { path = "../serving" }
 tokio             = { workspace = true }
 anyhow            = { workspace = true }
 tracing           = { workspace = true }
+indicatif         = { workspace = true }
