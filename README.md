@@ -23,7 +23,7 @@ The project is being built in staged layers:
 
 The current default runtime is **Phase 1**: a reliable BM25 search core with CUDA/neural systems kept outside the critical path until the core is stable. The long-term target is a **CUDA-first adaptive search engine** that uses available GPU, VRAM, CPU, RAM, and SSD throughput intelligently.
 
-For the detailed architecture and roadmap, see [`docs/ENGINEERING_SPEC.md`](docs/ENGINEERING_SPEC.md).
+For the detailed architecture and roadmap, see [`docs/ENGINEERING_SPEC.md`](https://github.com/raithe-industries/raithe-se/blob/main/data/docs/ENGINEERING_SPEC.md).
 
 ---
 
