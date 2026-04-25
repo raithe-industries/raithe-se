@@ -56,7 +56,7 @@ fn test_config(serving_bind: String) -> Config {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn end_to_end_crawl_index_search() {
     let site_addr = spawn_test_site().await;
     let seed      = Url::parse(&format!("http://{}/", site_addr)).unwrap();

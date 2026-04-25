@@ -50,8 +50,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 type HostLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
-const LAST_ERRORS_CAP:    usize = 20;
-const EMPTY_FRONTIER_NAP:  Duration = Duration::from_millis(200);
+const MAX_FETCH_ATTEMPTS: u8 = 3;
+
+#[derive(Clone, Copy, Debug)]
+enum UrlState {
+    /// Currently failing; n attempts so far. Eligible for retry until n hits MAX_FETCH_ATTEMPTS.
+    Pending(u8),
+    /// Permanently skip — fetched ok or gave up after MAX_FETCH_ATTEMPTS.
+    Done,
+}
 
 pub struct Crawler {
     config:       CrawlerConfig,
@@ -61,7 +68,7 @@ pub struct Crawler {
     scraper:      Scraper,
     crawl_log:    Arc<CrawlLog>,
     metrics:      Arc<Metrics>,
-    seen_urls:    Arc<Mutex<HashSet<Url>>>,
+    url_states:   Arc::new(Mutex::new(HashMap::new())),    
     fetched:      Arc<AtomicU64>,
     last_errors:  Arc<Mutex<VecDeque<String>>>,
 }
@@ -114,19 +121,26 @@ impl Crawler {
             let entry = match self.frontier.pop() {
                 Some(e) => e,
                 None    => {
-                    tokio::time::sleep(EMPTY_FRONTIER_NAP).await;
-                    continue;
+                    tokio::time::sleep(EMPTY_FRONTIER_NAP).await; 
+                    continue; 
                 }
             };
 
             let depth = entry.depth;
             let url   = entry.url;
 
-            // Permanent dedup — once popped, a URL is never re-fetched.
+            // Decide whether to attempt this URL now. Permanently-Done URLs skip;
+            // Pending URLs are attempted again until MAX_FETCH_ATTEMPTS.
             {
-                let mut seen = self.seen_urls.lock().unwrap_or_else(|p| p.into_inner());
-                if !seen.insert(url.clone()) {
-                    continue;
+                let mut states = self.url_states.lock().unwrap_or_else(|p| p.into_inner());
+                match states.get(&url).copied() {
+                    Some(UrlState::Done) => continue,
+                    Some(UrlState::Pending(n)) if n >= MAX_FETCH_ATTEMPTS => {
+                        states.insert(url.clone(), UrlState::Done);
+                        continue;
+                    }
+                    Some(UrlState::Pending(n)) => { states.insert(url.clone(), UrlState::Pending(n + 1)); }
+                    None                       => { states.insert(url.clone(), UrlState::Pending(1)); }
                 }
             }
 
@@ -161,9 +175,15 @@ impl Crawler {
                     self.record_error(msg);
                     self.metrics.pages_crawled_total.with_label_values(&["error"]).inc();
                     self.metrics.errors_total.with_label_values(&["crawler", "fetch"]).inc();
-                    continue;
+                    continue; // state stays Pending(n) — will retry if rediscovered
                 }
             };
+
+            // ... after status_class computed ...
+            {
+                let mut states = self.url_states.lock().unwrap_or_else(|p| p.into_inner());
+                states.insert(url.clone(), UrlState::Done);
+            }
 
             let status       = fetch_result.status;
             let fetched_at   = fetch_result.fetched_at;
@@ -196,14 +216,17 @@ impl Crawler {
     }
 
     pub fn enqueue_outlinks(&self, outlinks: &[Url], depth: u32) {
-        for url in outlinks {
-            // Skip URLs already crawled — saves a frontier round-trip.
-            let seen = self.seen_urls.lock().unwrap_or_else(|p| p.into_inner());
-            if seen.contains(url) { continue; }
-            drop(seen);
-            self.frontier.push(url, depth);
+        let to_push: Vec<Url> = {
+            let states = self.url_states.lock().unwrap_or_else(|p| p.into_inner());
+            outlinks.iter()
+                .filter(|u| !matches!(states.get(*u), Some(UrlState::Done)))
+                .cloned()
+                .collect()
+        };
+        for url in to_push {
+            self.frontier.push(&url, depth);
         }
-    }
+}
 
     // ── /debug/stats accessors ──────────────────────────────────────────────
 
@@ -212,7 +235,7 @@ impl Crawler {
     pub fn frontier_size(&self) -> u64 { self.frontier.depth() }
 
     pub fn seen_count(&self) -> usize {
-        self.seen_urls.lock().map(|s| s.len()).unwrap_or(0)
+        self.url_states.lock().map(|s| s.len()).unwrap_or(0)
     }
 
     pub fn last_errors(&self) -> Vec<String> {
