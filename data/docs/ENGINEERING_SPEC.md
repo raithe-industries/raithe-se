@@ -1,7 +1,7 @@
 # raithe-se Engineering Specification
 
 © RAiTHE INDUSTRIES INCORPORATED 2026  
-Status: Draft v2.1  
+Status: Confirmed. 
 Date: 25 Apr 2026
 
 ## 1. Purpose
@@ -622,7 +622,7 @@ The core engine is real when:
 
 ## 17. Definition of Done for CUDA Neural Layer
 
-The CUDA neural layer is real when:
+The CUDA neural layer is real and working properly when:
 
 - host resources are detected;
 - CUDA provider is selected and verified with inference;
