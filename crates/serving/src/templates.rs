@@ -2,7 +2,7 @@
 // crates/serving/src/templates.rs
 //
 // Inline HTML templates for the search UI.
-// Dark mode. Script/cursive "Search" wordmark. Minimal input + magnifier.
+// Dark mode. Alacarte cursive "Search" wordmark, served from /assets/fonts.
 // Instant-answer panel. RAiTHE footer branding.
 
 use crate::{InstantAnswerResponse, SearchResult};
@@ -11,6 +11,11 @@ use crate::{InstantAnswerResponse, SearchResult};
 
 const STYLE: &str = r#"
 <style>
+  @font-face {
+    font-family: 'Alacarte';
+    src: url('/assets/fonts/Alacarte.otf') format('opentype');
+    font-display: swap;
+  }
   :root {
     --bg:      #0d0d0d;
     --surface: #161616;
@@ -32,10 +37,11 @@ const STYLE: &str = r#"
   a { color: var(--green); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .wordmark {
-    font-family: 'Palatino Linotype', Palatino, 'Book Antiqua', serif;
-    font-style: italic;
-    font-size: 3rem;
-    letter-spacing: -0.02em;
+    /* Alacarte is a flowing cursive script; no italic transform needed. */
+    font-family: 'Alacarte', 'Palatino Linotype', Palatino, serif;
+    font-size: 6rem;
+    line-height: 1;
+    letter-spacing: 0;
     color: #fff;
     user-select: none;
   }
@@ -46,9 +52,9 @@ const STYLE: &str = r#"
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 2rem;
-    padding: 0.5rem 1.25rem;
+    padding: 0.6rem 1.25rem;
     width: 100%;
-    max-width: 600px;
+    max-width: 640px;
   }
   .search-form input {
     flex: 1;
@@ -84,7 +90,7 @@ const STYLE: &str = r#"
     border-radius: 0.5rem;
     padding: 1rem 1.25rem;
     margin-bottom: 1.5rem;
-    max-width: 640px;
+    max-width: 720px;
   }
   .instant-panel .label {
     font-size: 0.75rem;
@@ -97,10 +103,11 @@ const STYLE: &str = r#"
     font-size: 1.5rem;
     font-weight: 600;
   }
-  .result { margin-bottom: 1.5rem; max-width: 640px; }
-  .result-title { font-size: 1.1rem; }
-  .result-url   { font-size: 0.8rem; color: var(--muted); margin: 0.2rem 0; }
-  .result-snippet { font-size: 0.95rem; color: #ccc; line-height: 1.5; }
+  .result { margin-bottom: 1.5rem; max-width: 720px; }
+  .result-title    { font-size: 1.1rem; }
+  .result-title a  { color: #cfd8ff; }
+  .result-url      { font-size: 0.8rem; color: var(--muted); margin: 0.2rem 0; word-break: break-all; }
+  .result-snippet  { font-size: 0.95rem; color: #ccc; line-height: 1.5; }
 </style>
 "#;
 
@@ -181,12 +188,12 @@ pub fn render_results(
         results
             .iter()
             .map(|r| {
-                let title = html_escape(&r.title);
-                let url = html_escape(&r.url);
+                let title   = html_escape(&r.title);
+                let url     = html_escape(&r.url);
                 let snippet = html_escape(&r.snippet);
                 format!(
                     r#"<div class="result">
-  <div class="result-title"><a href="{url}">{title}</a></div>
+  <div class="result-title"><a href="{url}" rel="noopener">{title}</a></div>
   <div class="result-url">{url}</div>
   <div class="result-snippet">{snippet}</div>
 </div>"#
@@ -196,7 +203,7 @@ pub fn render_results(
     };
 
     let count = results.len();
-    let q = html_escape(query);
+    let q     = html_escape(query);
 
     format!(
         r#"<!DOCTYPE html>
@@ -214,7 +221,9 @@ pub fn render_results(
       padding: 1rem 2rem;
       border-bottom: 1px solid var(--border);
     }}
-    .wordmark {{ font-size: 1.5rem; }}
+    /* Compact wordmark in the results header — same Alacarte face,
+       roughly 1/3 the index-page size so it sits next to the input. */
+    header .wordmark {{ font-size: 2.25rem; }}
     main {{ padding: 2rem; }}
     .meta {{ font-size: 0.85rem; color: var(--muted); margin-bottom: 1.5rem; }}
   </style>
@@ -241,12 +250,12 @@ pub fn render_results(
 fn html_escape(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {
-            '&' => "&amp;".chars().collect::<Vec<_>>(),
-            '<' => "&lt;".chars().collect(),
-            '>' => "&gt;".chars().collect(),
-            '"' => "&quot;".chars().collect(),
+            '&'  => "&amp;".chars().collect::<Vec<_>>(),
+            '<'  => "&lt;".chars().collect(),
+            '>'  => "&gt;".chars().collect(),
+            '"'  => "&quot;".chars().collect(),
             '\'' => "&#39;".chars().collect(),
-            _ => vec![c],
+            _    => vec![c],
         })
         .collect()
 }
@@ -270,6 +279,13 @@ mod tests {
         let html = render_index();
         assert!(html.contains("Search"));
         assert!(html.contains("RAiTHE"));
+        assert!(html.contains("Alacarte"), "wordmark must reference Alacarte font");
+    }
+
+    #[test]
+    fn render_index_references_font_url() {
+        let html = render_index();
+        assert!(html.contains("/assets/fonts/Alacarte.otf"));
     }
 
     #[test]
@@ -281,7 +297,7 @@ mod tests {
     #[test]
     fn render_results_with_instant_answer() {
         let ia = InstantAnswerResponse {
-            kind: String::from("Calculation"),
+            kind:    String::from("Calculation"),
             display: String::from("42"),
         };
         let html = render_results("6 * 7", &[], Some(&ia));

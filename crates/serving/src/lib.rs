@@ -11,7 +11,7 @@ use std::time::Duration;
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::{header, HeaderValue, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -33,6 +33,10 @@ use raithe_ranker::Ranker;
 use raithe_session::{SessionId, SessionStore};
 
 const PARSER_ERRORS_CAP: usize = 20;
+
+/// Alacarte font, embedded into the binary at compile time. Served verbatim
+/// from `/assets/fonts/Alacarte.otf`. Path is relative to this source file.
+const ALACARTE_FONT: &[u8] = include_bytes!("../assets/Alacarte.otf");
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -90,7 +94,11 @@ pub struct AppState {
 
 #[derive(Debug, Deserialize)]
 struct SearchParams {
-    q: Option<String>,
+    q:          Option<String>,
+    /// Forces JSON output when set to "json", regardless of `Accept` header.
+    /// Allows API clients with permissive Accept headers (e.g. `*/*` from
+    /// curl) to opt out of HTML rendering without spoofing headers.
+    format:     Option<String>,
     #[allow(dead_code)]
     session_id: Option<String>,
 }
@@ -125,13 +133,13 @@ impl From<InstantAnswer> for InstantAnswerResponse {
 
 #[derive(Debug, Serialize)]
 struct DebugStatsResponse {
-    fetched:        u64,
-    parsed:         u64,
-    indexed_pending:  u64,
-    committed:        u64,
-    frontier_queue: u64,
-    seen_urls:      usize,
-    last_errors:    Vec<String>,
+    fetched:         u64,
+    parsed:          u64,
+    indexed_pending: u64,
+    committed:       u64,
+    frontier_queue:  u64,
+    seen_urls:       usize,
+    last_errors:     Vec<String>,
 }
 
 // ── Server ──────────────────────────────────────────────────────────────────
@@ -159,6 +167,7 @@ impl Server {
             .route("/health", get(handle_health))
             .route("/metrics", get(handle_metrics))
             .route("/debug/stats", get(handle_debug_stats))
+            .route("/assets/fonts/Alacarte.otf", get(handle_alacarte_font))
             .with_state(state)
             .layer(middleware::from_fn(move |req, next| {
                 let origins = origins.clone();
@@ -204,6 +213,20 @@ async fn handle_index() -> impl IntoResponse {
     Html(templates::render_index())
 }
 
+/// Serves the embedded Alacarte font with a long cache lifetime — the bytes
+/// never change between rebuilds (compile-time `include_bytes!`), and the
+/// font URL is hardcoded in the template, so an `immutable` policy is safe.
+async fn handle_alacarte_font() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE,  "font/otf"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        ALACARTE_FONT,
+    )
+}
+
 async fn handle_debug_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut last_errors = state.crawler.last_errors();
     if let Ok(parser_errs) = state.debug.parser_errors.lock() {
@@ -226,13 +249,15 @@ async fn handle_debug_stats(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 async fn handle_search(
     State(state):  State<Arc<AppState>>,
-    headers:       axum::http::HeaderMap,
+    headers:       HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
     let raw = match params.q.as_deref().filter(|s| !s.is_empty()) {
         Some(q) => q.to_owned(),
         None    => return Html(templates::render_index()).into_response(),
     };
+
+    let wants_html = wants_html_response(&headers, params.format.as_deref());
 
     let (session_id, mint_cookie) = resolve_session_id(&headers);
     if let Err(err) = state.sessions.record_query(&session_id, &raw) {
@@ -271,14 +296,21 @@ async fn handle_search(
         score:   r.score,
     }).collect();
 
-    let body = SearchResponse {
-        query:   parsed.original,
-        results,
-        instant: instant.map(InstantAnswerResponse::from),
-        total_results,
+    let instant_resp = instant.map(InstantAnswerResponse::from);
+
+    let mut response = if wants_html {
+        Html(templates::render_results(&parsed.original, &results, instant_resp.as_ref()))
+            .into_response()
+    } else {
+        let body = SearchResponse {
+            query:   parsed.original,
+            results,
+            instant: instant_resp,
+            total_results,
+        };
+        Json(body).into_response()
     };
 
-    let mut response = Json(body).into_response();
     if mint_cookie {
         if let Ok(v) = HeaderValue::from_str(&format!(
             "raithe_sid={session_id}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
@@ -290,9 +322,32 @@ async fn handle_search(
     response
 }
 
+// ── Content negotiation ─────────────────────────────────────────────────────
+
+/// Decides whether to serve HTML based on the `Accept` header and an optional
+/// `?format=` query override. Browsers always include `text/html` in their
+/// Accept lists; curl and SDK clients typically send `*/*` or
+/// `application/json` and get JSON.
+///
+/// Override precedence:
+///   `?format=json` → JSON  (test clients, programmatic access)
+///   `?format=html` → HTML  (debugging from a non-browser)
+///   no override    → sniff `Accept` for `text/html`
+fn wants_html_response(headers: &HeaderMap, format_override: Option<&str>) -> bool {
+    match format_override {
+        Some("json") => return false,
+        Some("html") => return true,
+        _ => {}
+    }
+    headers.get(header::ACCEPT)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.contains("text/html"))
+        .unwrap_or(false)
+}
+
 // ── Session id resolution ───────────────────────────────────────────────────
 
-fn resolve_session_id(headers: &axum::http::HeaderMap) -> (SessionId, bool) {
+fn resolve_session_id(headers: &HeaderMap) -> (SessionId, bool) {
     if let Some(v) = headers.get("x-raithe-session").and_then(|h| h.to_str().ok()) {
         if let Ok(id) = SessionId::parse_str(v.trim()) { return (id, false); }
     }
@@ -315,8 +370,11 @@ async fn security_headers(req: Request<Body>, next: Next, origins: Vec<String>) 
 
     headers.insert(header::STRICT_TRANSPORT_SECURITY,
         HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"));
+    // CSP — `font-src 'self'` explicitly permits the embedded Alacarte font.
+    // Without it, browsers fall back to default-src 'self' (still permissive)
+    // but explicit is safer if default-src ever tightens.
     headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"));
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'"));
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
 
@@ -349,5 +407,62 @@ mod tests {
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains("\"committed\":7"));
         assert!(json.contains("\"last_errors\""));
+    }
+
+    #[test]
+    fn alacarte_font_is_embedded() {
+        // Sanity check: the include_bytes! produced a non-empty OTF blob.
+        assert!(ALACARTE_FONT.len() > 1000, "embedded font too small to be valid");
+        // OTF magic: 0x00010000 (TrueType inside OTF) or 'OTTO' (CFF OTF)
+        let magic = &ALACARTE_FONT[..4];
+        assert!(
+            magic == [0x00, 0x01, 0x00, 0x00] || magic == b"OTTO",
+            "Alacarte.otf has unexpected magic bytes: {:?}",
+            magic
+        );
+    }
+
+    // ── content negotiation ────────────────────────────────────────────────
+
+    fn h(accept: &str) -> HeaderMap {
+        let mut hm = HeaderMap::new();
+        hm.insert(header::ACCEPT, HeaderValue::from_str(accept).unwrap());
+        hm
+    }
+
+    #[test]
+    fn html_when_browser_accepts_html() {
+        let hm = h("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        assert!(wants_html_response(&hm, None));
+    }
+
+    #[test]
+    fn json_when_client_only_accepts_json() {
+        let hm = h("application/json");
+        assert!(!wants_html_response(&hm, None));
+    }
+
+    #[test]
+    fn json_when_curl_default() {
+        let hm = h("*/*");
+        assert!(!wants_html_response(&hm, None));
+    }
+
+    #[test]
+    fn format_json_overrides_browser_accept() {
+        let hm = h("text/html");
+        assert!(!wants_html_response(&hm, Some("json")));
+    }
+
+    #[test]
+    fn format_html_overrides_curl_accept() {
+        let hm = h("*/*");
+        assert!(wants_html_response(&hm, Some("html")));
+    }
+
+    #[test]
+    fn no_accept_header_defaults_to_json() {
+        let hm = HeaderMap::new();
+        assert!(!wants_html_response(&hm, None));
     }
 }
