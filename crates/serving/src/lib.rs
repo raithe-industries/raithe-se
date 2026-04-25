@@ -294,13 +294,13 @@ async fn handle_search(
 
 fn resolve_session_id(headers: &axum::http::HeaderMap) -> (SessionId, bool) {
     if let Some(v) = headers.get("x-raithe-session").and_then(|h| h.to_str().ok()) {
-        if let Ok(id) = v.parse::<SessionId>() { return (id, false); }
+        if let Ok(id) = SessionId::parse_str(v.trim()) { return (id, false); }
     }
     if let Some(cookie) = headers.get(header::COOKIE).and_then(|h| h.to_str().ok()) {
         for kv in cookie.split(';') {
             let kv = kv.trim();
             if let Some(rest) = kv.strip_prefix("raithe_sid=") {
-                if let Ok(id) = rest.parse::<SessionId>() { return (id, false); }
+                if let Ok(id) = SessionId::parse_str(rest.trim()) { return (id, false); }
             }
         }
     }
