@@ -476,7 +476,7 @@ RUST_LOG=info ./raithe.sh --seeds data/seeds.txt
 
 ## Documentation
 
-- [`docs/ENGINEERING_SPEC.md`](docs/ENGINEERING_SPEC.md) — engineering specification and staged roadmap.
+- [`docs/ENGINEERING_SPEC.md`](https://github.com/raithe-industries/raithe-se/blob/main/data/docs/ENGINEERING_SPEC.md) — engineering specification and staged roadmap.
 - `data/config/engine.toml` — runtime defaults.
 - `raithe.sh` — operational launcher.
 
