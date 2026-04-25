@@ -1,5 +1,7 @@
 // © RAiTHE INDUSTRIES INCORPORATED 2026
 // crates/config/src/lib.rs
+//
+// Config loading, validation, and hot-reload.
 
 use std::path::Path;
 
@@ -35,6 +37,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Full engine configuration. Loaded once at startup; hot-reloaded via watcher.
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct Config {
     pub crawler: CrawlerConfig,
@@ -47,17 +50,48 @@ pub struct Config {
 }
 
 impl Config {
+    /// Loads (and validates) configuration from the file at `path`.
     pub fn load(path: &Path) -> Result<Self> {
         use figment::providers::{Env, Format, Serialized, Toml};
         use figment::Figment;
 
         let path_str = path.display().to_string();
-        let config = Figment::from(Serialized::defaults(Self::default()))
+        let config: Self = Figment::from(Serialized::defaults(Self::default()))
             .merge(Toml::file(path))
             .merge(Env::prefixed("RAITHE__").split("__"))
             .extract()
             .map_err(|source| Error::Load { path: path_str, source: Box::new(source) })?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Validates invariants that cannot be expressed in types alone.
+    ///
+    /// Called by `Config::load` and by the hot-reload watcher before
+    /// replacing the running config with a newly loaded one.
+    pub fn validate(&self) -> Result<()> {
+        if self.crawler.min_seeds == 0 {
+            return Err(Error::Invalid { reason: String::from("crawler.min_seeds must be > 0") });
+        }
+        if self.crawler.requests_per_sec <= 0.0 {
+            return Err(Error::Invalid { reason: String::from("crawler.requests_per_sec must be > 0") });
+        }
+        if self.indexer.writer_heap_mb == 0 {
+            return Err(Error::Invalid { reason: String::from("indexer.writer_heap_mb must be > 0") });
+        }
+        if self.ranker.gbdt_trees == 0 {
+            return Err(Error::Invalid { reason: String::from("ranker.gbdt_trees must be > 0") });
+        }
+        if self.serving.bind.is_empty() {
+            return Err(Error::Invalid { reason: String::from("serving.bind must not be empty") });
+        }
+        if self.engine.commit_every_secs == 0 {
+            return Err(Error::Invalid { reason: String::from("engine.commit_every_secs must be > 0") });
+        }
+        if self.engine.commit_every_docs == 0 {
+            return Err(Error::Invalid { reason: String::from("engine.commit_every_docs must be > 0") });
+        }
+        Ok(())
     }
 }
 
@@ -85,6 +119,13 @@ mod tests {
     }
 
     #[test]
+    fn zero_commit_secs_invalid() {
+        let mut cfg = Config::default();
+        cfg.engine.commit_every_secs = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn defaults_match_spec() {
         let cfg = Config::default();
         assert_eq!(cfg.crawler.max_depth, 6);
@@ -96,5 +137,6 @@ mod tests {
         assert_eq!(cfg.serving.bind, "0.0.0.0:8080");
         assert_eq!(cfg.serving.metrics_bind, "0.0.0.0:9090");
         assert_eq!(cfg.serving.max_request_bytes, 8192);
+        assert!(cfg.engine.phase1_only);
     }
 }

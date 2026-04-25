@@ -2880,6 +2880,7 @@ name = "raithe-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "indicatif",
  "raithe-common",
  "raithe-config",
@@ -2898,6 +2899,8 @@ dependencies = [
  "raithe-serving",
  "raithe-session",
  "raithe-storage",
+ "reqwest",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -3088,6 +3091,7 @@ dependencies = [
  "axum",
  "raithe-common",
  "raithe-config",
+ "raithe-crawler",
  "raithe-indexer",
  "raithe-instant",
  "raithe-linkgraph",
