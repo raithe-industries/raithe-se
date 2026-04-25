@@ -243,13 +243,18 @@ impl Indexer {
 }
 
 /// Reads `<path>/VERSION` and verifies it matches `INDEX_SCHEMA_VERSION`.
-/// Writes the current version on first open. Returns `SchemaMismatch` when
-/// an older version file is found — operator must `rm -rf` the index dir.
+///
+/// First-time open: writes the current version. If the directory contains
+/// existing Tantivy segment files but no `VERSION`, refuses to open — that
+/// indicates a pre-versioning index from before INDEX_SCHEMA_VERSION existed,
+/// and silently writing v2 to it could blesss an incompatible schema.
+///
+/// Operator recovery: `rm -rf <path>` and re-crawl.
 fn check_or_write_version(path: &Path) -> Result<()> {
     let v_path = path.join("VERSION");
     match std::fs::read_to_string(&v_path) {
         Ok(s) => {
-            let trimmed = s.trim();
+            let trimmed     = s.trim();
             let parsed: u32 = trimmed.parse().map_err(|_| Error::SchemaMismatch {
                 expected: INDEX_SCHEMA_VERSION,
                 found:    trimmed.to_owned(),
@@ -263,11 +268,46 @@ fn check_or_write_version(path: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Refuse to bless a non-empty pre-versioning index. We treat the
+            // presence of any tantivy segment file or `meta.json` as evidence
+            // that the dir was previously used — only a genuinely empty (or
+            // brand-new) dir is allowed to receive a fresh VERSION marker.
+            if has_existing_index_files(path)? {
+                return Err(Error::SchemaMismatch {
+                    expected: INDEX_SCHEMA_VERSION,
+                    found:    "missing VERSION in non-empty index directory".to_owned(),
+                });
+            }
             std::fs::write(&v_path, INDEX_SCHEMA_VERSION.to_string())
                 .map_err(|source| Error::VersionIo { source })
         }
         Err(source) => Err(Error::VersionIo { source }),
     }
+}
+
+/// Returns `true` if `path` contains any file that looks like Tantivy state.
+/// Used to detect pre-versioning indexes that should not be silently blessed.
+fn has_existing_index_files(path: &Path) -> Result<bool> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(e)                                                  => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound     => return Ok(false),
+        Err(source)                                            => return Err(Error::VersionIo { source }),
+    };
+    for entry in entries {
+        let entry = match entry { Ok(e) => e, Err(_) => continue };
+        let name  = entry.file_name();
+        let name  = name.to_string_lossy();
+        if name == "VERSION" { continue; }
+        if name == "meta.json" { return Ok(true); }
+        // Tantivy segment files: <hex>.{idx,store,term,pos,fast,fieldnorm}
+        if let Some(dot) = name.rfind('.') {
+            let ext = &name[dot + 1..];
+            if matches!(ext, "idx" | "store" | "term" | "pos" | "fast" | "fieldnorm") {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -359,5 +399,24 @@ mod tests {
         std::fs::write(dir.path().join("VERSION"), "1").unwrap();
         let result = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics());
         assert!(matches!(result, Err(Error::SchemaMismatch { .. })));
+    }
+
+    #[test]
+    fn refuses_to_bless_pre_versioning_index() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        // Simulate a leftover Tantivy index without a VERSION file.
+        std::fs::write(dir.path().join("meta.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("abc123.idx"), b"fake").unwrap();
+        let result = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics());
+        assert!(matches!(result, Err(Error::SchemaMismatch { .. })));
+    }
+
+#[test]
+    fn fresh_empty_dir_writes_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let _   = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
+        let v   = std::fs::read_to_string(dir.path().join("VERSION")).unwrap();
+        assert_eq!(v.trim(), INDEX_SCHEMA_VERSION.to_string());
     }
 }

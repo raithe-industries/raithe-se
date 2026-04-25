@@ -184,10 +184,27 @@ impl Crawler {
                     self.record_error(msg);
                     self.metrics.pages_crawled_total.with_label_values(&["error"]).inc();
                     self.metrics.errors_total.with_label_values(&["crawler", "fetch"]).inc();
-                    // State stays `Pending(n)` — eligible for retry if rediscovered.
-                    continue;
-                }
-            };
+
+                    // Requeue for retry while attempts remain. The state map was already
+                    // bumped to Pending(n+1) at pop time; if n+1 < MAX, push back to the
+                    // frontier. If we're at the limit, mark Done so we don't loop.
+                    let attempts = {
+                        let states = self.url_states.lock().unwrap_or_else(|p| p.into_inner());
+                        match states.get(&url).copied() {
+                            Some(UrlState::Pending(n)) => n,
+                            _                          => MAX_FETCH_ATTEMPTS,
+                        }
+                    };
+        if attempts < MAX_FETCH_ATTEMPTS {
+            // Same depth — depth tracks the link-graph distance from a seed,
+            // not the retry generation, so it must not change.
+            self.frontier.push(&url, depth);
+        } else {
+            self.mark_done(&url);
+        }
+        continue;
+    }
+};
 
             let status       = fetch_result.status;
             let fetched_at   = fetch_result.fetched_at;
