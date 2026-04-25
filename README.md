@@ -12,7 +12,7 @@
                                          SEARCH ENGINE
 ```
 
-`raithe-se` is a Rust search engine built for serious workstation-class PCs: fast CPUs, fast SSDs, 32 GB+ RAM, and CUDA-capable NVIDIA GPUs. It is designed to scale with the machine it boots on, using CPU and GPU together rather than treating neural acceleration as an afterthought.
+`raithe-se` is a world-class search engine built in Rust for serious workstation-class PCs: fast CPUs, fast SSDs, 32 GB+ RAM, and CUDA-capable NVIDIA GPUs with 8GB VRAM minimum. It is designed to scale with the machine it boots on, using all resources; CPU, RAM, and GPU’s VRAM together rather than treating neural acceleration as an afterthought.
 
 The project is being built in staged layers:
 
@@ -81,39 +81,201 @@ The intended policy is:
 
 ---
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ## Workspace Layout
 
 ```text
 raithe-se/
-├── Cargo.toml
 ├── Cargo.lock
+├── Cargo.toml
+├── crates
+│   ├── app
+│   │   ├── Cargo.toml
+│   │   ├── src
+│   │   │   ├── lib.rs
+│   │   │   └── main.rs
+│   │   └── tests
+│   │       └── end_to_end.rs
+│   ├── common
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       ├── document_id.rs
+│   │       ├── embedding.rs
+│   │       ├── lib.rs
+│   │       ├── query_types.rs
+│   │       ├── simhash.rs
+│   │       ├── timestamp.rs
+│   │       └── url_type.rs
+│   ├── config
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       ├── crawler.rs
+│   │       ├── engine.rs
+│   │       ├── indexer.rs
+│   │       ├── lib.rs
+│   │       ├── neural.rs
+│   │       ├── ranker.rs
+│   │       ├── scraper.rs
+│   │       ├── serving.rs
+│   │       └── watcher.rs
+│   ├── crawler
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       ├── frontier.rs
+│   │       ├── lib.rs
+│   │       ├── policy.rs
+│   │       └── robots.rs
+│   ├── freshness
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── indexer
+│   │   ├── benches
+│   │   │   └── indexer_throughput.rs
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── instant
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── linkgraph
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── metrics
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── neural
+│   │   ├── benches
+│   │   │   └── neural_embed_latency.rs
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── parser
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── query
+│   │   ├── benches
+│   │   │   └── query_latency.rs
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── ranker
+│   │   ├── benches
+│   │   │   └── ranker_latency.rs
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── scraper
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── semantic
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── serving
+│   │   ├── assets
+│   │   │   └── Alacarte.otf
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       ├── lib.rs
+│   │       └── templates.rs
+│   ├── session
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   └── storage
+│       ├── Cargo.toml
+│       └── src
+│           ├── backup.rs
+│           ├── crawl_log.rs
+│           ├── doc_store.rs
+│           ├── lib.rs
+│           └── mmap_file.rs
+├── data
+│   ├── config
+│   │   └── engine.toml
+│   ├── crawl.log
+│   ├── docs
+│   │   └── ENGINEERING_SPEC.md
+│   ├── index
+│   │   ├── 0788215bd87e4cc892eb92ef228a0df1.fast
+│   │   ├── 0788215bd87e4cc892eb92ef228a0df1.fieldnorm
+│   │   ├── 0788215bd87e4cc892eb92ef228a0df1.idx
+│   │   ├── 0788215bd87e4cc892eb92ef228a0df1.pos
+│   │   ├── 0788215bd87e4cc892eb92ef228a0df1.store
+│   │   ├── 0788215bd87e4cc892eb92ef228a0df1.term
+│   │   ├── 176fdc8a9119446abeee6b3331fdebfd.fast
+│   │   ├── 176fdc8a9119446abeee6b3331fdebfd.fieldnorm
+│   │   ├── 176fdc8a9119446abeee6b3331fdebfd.idx
+│   │   ├── 176fdc8a9119446abeee6b3331fdebfd.pos
+│   │   ├── 176fdc8a9119446abeee6b3331fdebfd.store
+│   │   ├── 176fdc8a9119446abeee6b3331fdebfd.term
+│   │   ├── 5b9a818e1f7a4bc7814a3005f7f46a5a.fast
+│   │   ├── 5b9a818e1f7a4bc7814a3005f7f46a5a.fieldnorm
+│   │   ├── 5b9a818e1f7a4bc7814a3005f7f46a5a.idx
+│   │   ├── 5b9a818e1f7a4bc7814a3005f7f46a5a.pos
+│   │   ├── 5b9a818e1f7a4bc7814a3005f7f46a5a.store
+│   │   ├── 5b9a818e1f7a4bc7814a3005f7f46a5a.term
+│   │   ├── 9f7566de570f441eb7408a7ebcf35c63.fast
+│   │   ├── 9f7566de570f441eb7408a7ebcf35c63.fieldnorm
+│   │   ├── 9f7566de570f441eb7408a7ebcf35c63.idx
+│   │   ├── 9f7566de570f441eb7408a7ebcf35c63.pos
+│   │   ├── 9f7566de570f441eb7408a7ebcf35c63.store
+│   │   ├── 9f7566de570f441eb7408a7ebcf35c63.term
+│   │   ├── ecef9704e0eb409dae9b53a13c12dda3.fast
+│   │   ├── ecef9704e0eb409dae9b53a13c12dda3.fieldnorm
+│   │   ├── ecef9704e0eb409dae9b53a13c12dda3.idx
+│   │   ├── ecef9704e0eb409dae9b53a13c12dda3.pos
+│   │   ├── ecef9704e0eb409dae9b53a13c12dda3.store
+│   │   ├── ecef9704e0eb409dae9b53a13c12dda3.term
+│   │   ├── meta.json
+│   │   └── VERSION
+│   ├── models
+│   │   ├── embedder
+│   │   │   ├── config.json
+│   │   │   ├── model.onnx
+│   │   │   ├── special_tokens_map.json
+│   │   │   ├── tokenizer_config.json
+│   │   │   ├── tokenizer.json
+│   │   │   └── vocab.txt
+│   │   ├── generator
+│   │   │   ├── model.onnx
+│   │   │   ├── model.onnx.data
+│   │   │   └── tokenizer.json
+│   │   ├── README.md
+│   │   └── reranker
+│   │       ├── config.json
+│   │       ├── model.onnx
+│   │       ├── model.onnx_data
+│   │       ├── special_tokens_map.json
+│   │       ├── tokenizer_config.json
+│   │       └── tokenizer.json
+│   └── seeds.txt
+├── LICENSE.md
 ├── raithe.sh
-├── data/
-│   ├── config/
-│   │   └── engine.toml
-│   ├── models/
-│   └── seeds.txt
-├── docs/
-│   └── ENGINEERING_SPEC.md
-└── crates/
-    ├── app/        # binary entry point and Phase 1 orchestration
-    ├── common/     # shared primitive types
-    ├── config/     # runtime configuration and hot reload
-    ├── crawler/    # frontier, robots, politeness, crawl dispatch
-    ├── freshness/  # future stale detection and recrawl policy
-    ├── indexer/    # Tantivy schema, ingestion, commit, search
-    ├── instant/    # deterministic and LLM-assisted instant answers
-    ├── linkgraph/  # future link graph and PageRank
-    ├── metrics/    # tracing and Prometheus metrics
-    ├── neural/     # ONNX Runtime / CUDA neural engines
-    ├── parser/     # HTML to ParsedDocument
-    ├── query/      # query processing and optional rewriting
-    ├── ranker/     # BM25/GBDT/neural ranking layers
-    ├── scraper/    # HTTP fetcher
-    ├── semantic/   # future ANN vector index
-    ├── serving/    # Axum HTTP server and UI
-    ├── session/    # session tracking
-    └── storage/    # crawl log, doc store, mmap, backup primitives
+├── README.md
+└── target
+    
 ```
 
 ---
