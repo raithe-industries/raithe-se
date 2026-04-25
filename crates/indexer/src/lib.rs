@@ -58,6 +58,9 @@ impl IndexSchema {
     fn build() -> (Schema, Self) {
         let mut builder = Schema::builder();
 
+        // doc_id MUST be INDEXED for `delete_term` (used by `upsert`) to match.
+        // Without INDEXED, tantivy silently drops the delete and you get
+        // duplicates on re-crawl. FAST is required for `max_doc_id` recovery.
         let doc_id      = builder.add_u64_field("doc_id", INDEXED | STORED | FAST);
         let url         = builder.add_text_field("url", STRING | STORED);
         let title       = builder.add_text_field("title", TEXT | STORED);
@@ -84,6 +87,79 @@ pub struct Indexer {
 }
 
 impl Indexer {
+    /// Opens (or creates) the on-disk Tantivy index at `path`.
+    ///
+    /// Order of operations is load-bearing:
+    ///   1. `create_dir_all` so the path exists for the version check.
+    ///   2. `check_or_write_version` BEFORE `Index::open_or_create` — the
+    ///      latter writes `meta.json`, which our pre-version-file detector
+    ///      treats as evidence of a legacy index and refuses to bless.
+    ///   3. Open the Tantivy directory and writer.
+    ///   4. Recover `committed` count from the on-disk segments so restart
+    ///      doesn't reset `committed_count()` to zero.
+    pub fn new(path: &Path, config: &IndexerConfig, metrics: Arc<Metrics>) -> Result<Self> {
+        let (schema, fields) = IndexSchema::build();
+
+        std::fs::create_dir_all(path)
+            .map_err(|err| tantivy::TantivyError::IoError(Arc::new(err)))?;
+
+        check_or_write_version(path)?;
+
+        let dir   = tantivy::directory::MmapDirectory::open(path)
+            .map_err(tantivy::TantivyError::from)?;
+        let index = Index::open_or_create(dir, schema)?;
+
+        let heap_bytes = config.writer_heap_mb * 1024 * 1024;
+        let writer     = index.writer(heap_bytes as usize)?;
+        let writer     = RwLock::new(writer);
+
+        // Recover committed count from the on-disk index (post-restart).
+        let initial_committed = {
+            let reader = index.reader_builder()
+                .reload_policy(ReloadPolicy::OnCommitWithDelay)
+                .try_into()?;
+            reader.searcher().num_docs()
+        };
+
+        Ok(Self {
+            index,
+            schema: fields,
+            writer,
+            metrics,
+            pending:   AtomicU64::new(0),
+            committed: AtomicU64::new(initial_committed),
+        })
+    }
+
+    /// Inserts a new document. Does NOT replace existing docs with the same
+    /// `doc_id` — for that, use `upsert`. Use `add` only when you know the
+    /// id is fresh (e.g. first-time ingestion of a newly-allocated id).
+    pub fn add(&self, doc: &ParsedDocument) -> Result<()> {
+        if doc.id == DocumentId::ZERO {
+            return Err(Error::InvalidQuery {
+                query:  String::new(),
+                reason: "document id is ZERO — caller must assign before indexing".to_owned(),
+            });
+        }
+
+        let headings = doc.headings.join(" ");
+
+        let mut tantivy_doc = TantivyDocument::default();
+        tantivy_doc.add_u64(self.schema.doc_id, doc.id.get());
+        tantivy_doc.add_text(self.schema.url, doc.url.as_str());
+        tantivy_doc.add_text(self.schema.title, &doc.title);
+        tantivy_doc.add_text(self.schema.description, &doc.description);
+        tantivy_doc.add_text(self.schema.headings, &headings);
+        tantivy_doc.add_text(self.schema.body, &doc.body_text);
+
+        let writer = self.writer.write().map_err(|_| Error::LockPoisoned)?;
+        writer.add_document(tantivy_doc)?;
+
+        self.pending.fetch_add(1, Ordering::Relaxed);
+        self.metrics.index_documents_total.inc();
+        Ok(())
+    }
+
     /// Atomically replaces any existing document with the same `doc_id` and
     /// adds the new one. Required when re-indexing a URL whose registry id
     /// is already present in the index — without this, repeated crawls of
@@ -233,7 +309,7 @@ impl Indexer {
 /// First-time open: writes the current version. If the directory contains
 /// existing Tantivy segment files but no `VERSION`, refuses to open — that
 /// indicates a pre-versioning index from before INDEX_SCHEMA_VERSION existed,
-/// and silently writing v2 to it could blesss an incompatible schema.
+/// and silently writing v2 to it could bless an incompatible schema.
 ///
 /// Operator recovery: `rm -rf <path>` and re-crawl.
 fn check_or_write_version(path: &Path) -> Result<()> {
@@ -398,7 +474,7 @@ mod tests {
         assert!(matches!(result, Err(Error::SchemaMismatch { .. })));
     }
 
-#[test]
+    #[test]
     fn fresh_empty_dir_writes_version() {
         let dir = tempfile::tempdir().unwrap();
         let _   = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
@@ -406,7 +482,7 @@ mod tests {
         assert_eq!(v.trim(), INDEX_SCHEMA_VERSION.to_string());
     }
 
-#[test]
+    #[test]
     fn upsert_replaces_existing_doc() {
         let dir     = tempfile::tempdir().unwrap();
         let indexer = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
