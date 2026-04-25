@@ -84,43 +84,24 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    pub fn new(path: &Path, config: &IndexerConfig, metrics: Arc<Metrics>) -> Result<Self> {
-        let (schema, fields) = IndexSchema::build();
-
-        std::fs::create_dir_all(path)
-            .map_err(|err| tantivy::TantivyError::IoError(Arc::new(err)))?;
-        check_or_write_version(path)?;
-
-        let dir   = tantivy::directory::MmapDirectory::open(path).map_err(tantivy::TantivyError::from)?;
-        let index = Index::open_or_create(dir, schema)?;
-
-        let heap_bytes = config.writer_heap_mb * 1024 * 1024;
-        let writer     = index.writer(heap_bytes as usize)?;
-        let writer     = RwLock::new(writer);
-
-        // Recover committed count from the on-disk index (post-restart).
-        let initial_committed = {
-            let reader = index.reader_builder()
-                .reload_policy(ReloadPolicy::OnCommitWithDelay)
-                .try_into()?;
-            reader.searcher().num_docs()
-        };
-
-        Ok(Self {
-            index,
-            schema: fields,
-            writer,
-            metrics,
-            pending:   AtomicU64::new(0),
-            committed: AtomicU64::new(initial_committed),
-        })
-    }
-
-    pub fn add(&self, doc: &ParsedDocument) -> Result<()> {
+    /// Atomically replaces any existing document with the same `doc_id` and
+    /// adds the new one. Required when re-indexing a URL whose registry id
+    /// is already present in the index — without this, repeated crawls of
+    /// the same URL produce duplicate hits in search results.
+    ///
+    /// Implementation: `delete_term(doc_id)` then `add_document(doc)`. Both
+    /// operations queue under the writer's batch and are durable on the
+    /// next commit (see `commit` / `maybe_commit`). Same `pending++` step
+    /// as `add`, so threshold-driven commits work transparently.
+    ///
+    /// Note: tantivy's `delete_term` matches against an `INDEXED` field. The
+    /// `doc_id` field has `INDEXED | STORED | FAST` in `IndexSchema::build`,
+    /// so this is well-formed.
+    pub fn upsert(&self, doc: &ParsedDocument) -> Result<()> {
         if doc.id == DocumentId::ZERO {
             return Err(Error::InvalidQuery {
                 query:  String::new(),
-                reason: "document id is ZERO — caller must assign before indexing".to_owned(),
+                reason: "document id is ZERO — registry must assign before indexing".to_owned(),
             });
         }
 
@@ -135,6 +116,11 @@ impl Indexer {
         tantivy_doc.add_text(self.schema.body, &doc.body_text);
 
         let writer = self.writer.write().map_err(|_| Error::LockPoisoned)?;
+        // Delete first, then add. tantivy serialises both operations into the
+        // segment's delete+add log; on commit, the old doc disappears from the
+        // searchable view in the same atomic step the new one becomes visible.
+        let term = tantivy::Term::from_field_u64(self.schema.doc_id, doc.id.get());
+        writer.delete_term(term);
         writer.add_document(tantivy_doc)?;
 
         self.pending.fetch_add(1, Ordering::Relaxed);
@@ -418,5 +404,33 @@ mod tests {
         let _   = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
         let v   = std::fs::read_to_string(dir.path().join("VERSION")).unwrap();
         assert_eq!(v.trim(), INDEX_SCHEMA_VERSION.to_string());
+    }
+
+#[test]
+    fn upsert_replaces_existing_doc() {
+        let dir     = tempfile::tempdir().unwrap();
+        let indexer = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
+
+        let mut v1 = make_doc(1, "version one", "alpha beta gamma");
+        v1.url     = Url::parse("https://example.com/x").unwrap();
+        indexer.add(&v1).unwrap();
+        indexer.commit().unwrap();
+        assert_eq!(indexer.committed_count(), 1);
+
+        // Same doc_id, different content. After upsert+commit, only the new
+        // version should be searchable.
+        let mut v2 = make_doc(1, "version two", "delta epsilon zeta");
+        v2.url     = Url::parse("https://example.com/x").unwrap();
+        indexer.upsert(&v2).unwrap();
+        indexer.commit().unwrap();
+
+        assert_eq!(indexer.committed_count(), 1, "upsert must not duplicate");
+
+        let hits_old = indexer.search(&ParsedQuery::raw("alpha")).unwrap();
+        assert!(hits_old.is_empty(), "old version still searchable: {hits_old:?}");
+
+        let hits_new = indexer.search(&ParsedQuery::raw("delta")).unwrap();
+        assert_eq!(hits_new.len(), 1);
+        assert_eq!(hits_new[0].id, DocumentId::new(1));
     }
 }

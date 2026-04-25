@@ -1,0 +1,36 @@
+# © RAiTHE INDUSTRIES INCORPORATED 2026
+# Development config — tiny crawl, fast commits, localhost binding.
+# Use:  RAITHE_CONFIG=data/config/dev.toml ./raithe.sh
+# Or inline:  ./target/release/raithe-se --config data/config/dev.toml
+
+[engine]
+phase1_only        = true
+commit_every_docs  = 1
+commit_every_secs  = 1
+
+[crawler]
+min_seeds          = 3
+max_pages          = 20
+max_depth          = 2
+requests_per_sec   = 20.0
+user_agent         = "raithe-se-dev/0.1"
+
+[scraper]
+user_agent         = "raithe-se-dev/0.1"
+timeout_secs       = 10
+connect_timeout_secs = 5
+max_redirects      = 5
+max_body_bytes     = 5242880   # 5 MiB
+
+[indexer]
+writer_heap_mb     = 64
+
+[ranker]
+gbdt_model_path    = "data/models/ranker/gbdt.model"
+reranker_top_k     = 32
+
+[serving]
+bind               = "127.0.0.1:8080"
+session_ttl_secs   = 86400
+max_request_bytes  = 65536
+allowed_origins    = []

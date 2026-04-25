@@ -3126,6 +3126,7 @@ dependencies = [
  "memmap2",
  "raithe-common",
  "raithe-config",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

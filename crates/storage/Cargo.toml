@@ -1,7 +1,7 @@
 # © RAiTHE INDUSTRIES INCORPORATED 2026
 [package]
 name        = "raithe-storage"
-description = "All durable I/O — crawl log, doc store, mmap, backups"
+description = "All durable I/O — crawl log, doc store, mmap, backups, URL registry"
 version.workspace    = true
 edition.workspace    = true
 license.workspace    = true
@@ -16,6 +16,10 @@ serde_json    = { workspace = true }
 zstd          = { workspace = true }
 memmap2       = { workspace = true }
 thiserror     = { workspace = true }
+# rusqlite — bundled feature compiles SQLite from source; no system libsqlite3
+# dependency, no version-skew between Ubuntu 24.04 and dev hosts. Cost: ~3s
+# longer cold build. Worth it for reproducibility.
+rusqlite      = { workspace = true, features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

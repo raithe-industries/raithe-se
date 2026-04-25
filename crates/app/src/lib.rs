@@ -22,16 +22,17 @@ use raithe_ranker::Ranker;
 use raithe_scraper::Scraper;
 use raithe_serving::{AppState, DebugStats, Server};
 use raithe_session::SessionStore;
-use raithe_storage::{CrawlLog, DocStore};
+use raithe_storage::{CrawlLog, DocStore, UrlRegistry, UrlStatus};
 
 /// Phase 1 engine handles. Held by both `main` and integration tests.
 pub struct Phase1Engine {
-    pub config:  Config,
-    pub metrics: Arc<Metrics>,
-    pub crawler: Arc<Crawler>,
-    pub indexer: Arc<Indexer>,
-    pub debug:   Arc<DebugStats>,
-    pub state:   Arc<AppState>,
+    pub config:   Config,
+    pub metrics:  Arc<Metrics>,
+    pub crawler:  Arc<Crawler>,
+    pub indexer:  Arc<Indexer>,
+    pub registry: Arc<UrlRegistry>,
+    pub debug:    Arc<DebugStats>,
+    pub state:    Arc<AppState>,
 }
 
 impl Phase1Engine {
@@ -51,6 +52,13 @@ impl Phase1Engine {
         let indexer = Arc::new(
             Indexer::new(&data_dir.join("index"), &config.indexer, Arc::clone(&metrics))
                 .context("indexer init")?
+        );
+
+        // URL→DocumentId registry — durable across restarts. Replaces the
+        // in-memory monotonic counter that previously caused duplicate hits
+        // on re-crawl.
+        let registry = Arc::new(
+            UrlRegistry::open(&data_dir.join("url_registry.db")).context("url registry init")?
         );
 
         let processor = Arc::new(QueryProcessor::pass_through(Arc::clone(&metrics)));
@@ -74,18 +82,18 @@ impl Phase1Engine {
         let debug = Arc::new(DebugStats::new());
 
         let state = Arc::new(AppState {
-            config:  config.serving.clone(),
-            metrics: Arc::clone(&metrics),
-            indexer: Arc::clone(&indexer),
+            config:    config.serving.clone(),
+            metrics:   Arc::clone(&metrics),
+            indexer:   Arc::clone(&indexer),
             processor,
             ranker,
             instant,
             sessions,
-            crawler: Arc::clone(&crawler),
-            debug:   Arc::clone(&debug),
+            crawler:   Arc::clone(&crawler),
+            debug:     Arc::clone(&debug),
         });
 
-        Ok(Self { config, metrics, crawler, indexer, debug, state })
+        Ok(Self { config, metrics, crawler, indexer, registry, debug, state })
     }
 
     /// Spawns the crawler, indexing pipeline, and periodic-commit task.
@@ -104,34 +112,15 @@ impl Phase1Engine {
             });
         }
 
-        // Indexing pipeline (parse -> add).
+        // Indexing pipeline (parse -> registry assign -> upsert).
         {
             let crawler   = Arc::clone(&self.crawler);
             let indexer   = Arc::clone(&self.indexer);
+            let registry  = Arc::clone(&self.registry);
             let debug     = Arc::clone(&self.debug);
             let max_depth = self.config.crawler.max_depth;
             let threshold = self.config.engine.commit_every_docs;
             let parser    = Parser::new();
-
-            // Resume the in-memory monotonic ID counter past the largest
-            // persisted doc_id; without this, the counter restarts at 0 on
-            // every process boot and silently overwrites previously-indexed
-            // docs once the index is non-empty.
-            //
-            // NOTE: This is a stop-gap. The durable solution is a URL→ID
-            // registry (see PR-A0). With the registry in place, doc IDs are
-            // assigned at URL discovery and `next_doc_id` becomes irrelevant.
-            let mut next_doc_id: raithe_common::DocumentId = match indexer.max_doc_id() {
-                Ok(Some(id)) => {
-                    tracing::info!(?id, "resuming doc id space from persisted max");
-                    id
-                }
-                Ok(None) => raithe_common::DocumentId::ZERO,
-                Err(e)   => {
-                    tracing::warn!("failed to read max doc id, starting fresh: {e}");
-                    raithe_common::DocumentId::ZERO
-                }
-            };
 
             tokio::spawn(async move {
                 while let Some((fetch_result, depth)) = fetch_rx.recv().await {
@@ -147,21 +136,34 @@ impl Phase1Engine {
                         }
                     };
 
-                    match next_doc_id.next() {
-                        Some(id) => { next_doc_id = id; doc.id = id; }
-                        None     => {
-                            tracing::error!("document id space exhausted — halting indexing");
-                            break;
+                    // Registry-assigned id is durable across restarts. Same
+                    // URL → same id forever, so `upsert` below replaces any
+                    // prior version of this URL atomically.
+                    let id = match registry.assign(&doc.url) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let msg = format!("registry assign {}: {e}", doc.url);
+                            tracing::warn!("{msg}");
+                            debug.record_parser_error(msg);
+                            continue;
                         }
-                    }
+                    };
+                    doc.id = id;
 
-                    if let Err(e) = indexer.add(&doc) {
+                    if let Err(e) = indexer.upsert(&doc) {
                         let msg = format!("index {}: {e}", doc.url);
                         tracing::warn!("{msg}");
                         debug.record_parser_error(msg);
                         continue;
                     }
                     debug.record_parsed();
+
+                    // Best-effort status update. A failure here doesn't roll
+                    // back the index write — registry status is advisory,
+                    // not the source of truth for searchability.
+                    if let Err(e) = registry.mark_status(&doc.url, UrlStatus::Fetched) {
+                        tracing::warn!("registry mark_status {}: {e}", doc.url);
+                    }
 
                     if let Err(e) = indexer.maybe_commit(threshold) {
                         tracing::warn!("maybe_commit error: {e}");
