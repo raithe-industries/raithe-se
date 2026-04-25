@@ -4,6 +4,7 @@
 // Tantivy inverted index — schema, tokeniser, ingestion, BM25F search.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use raithe_common::{DocumentId, ParsedQuery, RawHit, Url};
@@ -19,10 +20,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Tantivy error: {source}")]
-    Tantivy {
-        #[source]
-        source: tantivy::TantivyError,
-    },
+    Tantivy { #[source] source: tantivy::TantivyError },
     #[error("index writer lock poisoned")]
     LockPoisoned,
     #[error("invalid query '{query}': {reason}")]
@@ -34,93 +32,84 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<tantivy::TantivyError> for Error {
-    fn from(source: tantivy::TantivyError) -> Self {
-        Self::Tantivy { source }
-    }
+    fn from(source: tantivy::TantivyError) -> Self { Self::Tantivy { source } }
 }
 
-/// Fields in the Tantivy schema.
 #[derive(Clone, Copy, Debug)]
 pub struct IndexSchema {
-    pub doc_id: Field,
-    pub url: Field,
-    pub title: Field,
+    pub doc_id:      Field,
+    pub url:         Field,
+    pub title:       Field,
     pub description: Field,
-    pub headings: Field,
-    pub body: Field,
+    pub headings:    Field,
+    pub body:        Field,
 }
 
 impl IndexSchema {
     fn build() -> (Schema, Self) {
         let mut builder = Schema::builder();
 
-        let doc_id = builder.add_u64_field("doc_id", INDEXED | STORED | FAST);
-        let url = builder.add_text_field("url", STRING | STORED);
-        let title = builder.add_text_field("title", TEXT | STORED);
+        let doc_id      = builder.add_u64_field("doc_id", INDEXED | STORED | FAST);
+        let url         = builder.add_text_field("url", STRING | STORED);
+        let title       = builder.add_text_field("title", TEXT | STORED);
         let description = builder.add_text_field("description", TEXT | STORED);
-        let headings = builder.add_text_field("headings", TEXT);
-        let body = builder.add_text_field("body", TEXT);
+        let headings    = builder.add_text_field("headings", TEXT);
+        // BUGFIX: body must be STORED so search() can produce non-empty snippets.
+        let body        = builder.add_text_field("body", TEXT | STORED);
 
         let schema = builder.build();
-        let fields = Self {
-            doc_id,
-            url,
-            title,
-            description,
-            headings,
-            body,
-        };
-
+        let fields = Self { doc_id, url, title, description, headings, body };
         (schema, fields)
     }
 }
 
-/// Tantivy-backed inverted index.
-///
-/// `IndexWriter` is protected by an `RwLock` — lock poisoning is handled
-/// explicitly rather than with `.unwrap()` (DEV-007 fix).
 pub struct Indexer {
-    index: Index,
-    schema: IndexSchema,
-    writer: RwLock<IndexWriter>,
-    metrics: Arc<Metrics>,
+    index:     Index,
+    schema:    IndexSchema,
+    writer:    RwLock<IndexWriter>,
+    metrics:   Arc<Metrics>,
+    /// Documents added since the last successful commit.
+    pending:   AtomicU64,
+    /// Documents in the searchable (post-commit) segment.
+    committed: AtomicU64,
 }
 
 impl Indexer {
-    /// Opens (or creates) an index under `path` using the given config.
-    ///
-    /// The writer heap is set from `config.writer_heap_mb` — prototype used
-    /// a hard-coded 50 MB (DEV-007); default is now 1 GB.
     pub fn new(path: &Path, config: &IndexerConfig, metrics: Arc<Metrics>) -> Result<Self> {
         let (schema, fields) = IndexSchema::build();
 
         std::fs::create_dir_all(path)
             .map_err(|err| tantivy::TantivyError::IoError(Arc::new(err)))?;
 
-        let dir =
-            tantivy::directory::MmapDirectory::open(path).map_err(tantivy::TantivyError::from)?;
+        let dir   = tantivy::directory::MmapDirectory::open(path).map_err(tantivy::TantivyError::from)?;
         let index = Index::open_or_create(dir, schema)?;
 
         let heap_bytes = config.writer_heap_mb * 1024 * 1024;
-        let writer = index.writer(heap_bytes as usize)?;
-        let writer = RwLock::new(writer);
+        let writer     = index.writer(heap_bytes as usize)?;
+        let writer     = RwLock::new(writer);
+
+        // Recover committed count from the on-disk index (post-restart).
+        let initial_committed = {
+            let reader = index.reader_builder()
+                .reload_policy(ReloadPolicy::OnCommitWithDelay)
+                .try_into()?;
+            reader.searcher().num_docs()
+        };
 
         Ok(Self {
             index,
             schema: fields,
             writer,
             metrics,
+            pending:   AtomicU64::new(0),
+            committed: AtomicU64::new(initial_committed),
         })
     }
 
-    /// Ingests a `ParsedDocument` into the index.
-    ///
-    /// The document must have a real `DocumentId` assigned by the caller
-    /// before this call — `DocumentId::ZERO` is rejected.
     pub fn add(&self, doc: &ParsedDocument) -> Result<()> {
         if doc.id == DocumentId::ZERO {
             return Err(Error::InvalidQuery {
-                query: String::new(),
+                query:  String::new(),
                 reason: "document id is ZERO — caller must assign before indexing".to_owned(),
             });
         }
@@ -138,104 +127,87 @@ impl Indexer {
         let writer = self.writer.write().map_err(|_| Error::LockPoisoned)?;
         writer.add_document(tantivy_doc)?;
 
+        self.pending.fetch_add(1, Ordering::Relaxed);
         self.metrics.index_documents_total.inc();
-
         Ok(())
     }
 
-    /// Commits all pending documents to the index.
+    /// Commits all pending documents.
     pub fn commit(&self) -> Result<()> {
         let mut writer = self.writer.write().map_err(|_| Error::LockPoisoned)?;
         writer.commit()?;
+        self.pending.store(0, Ordering::Relaxed);
+
+        let count = {
+            let reader = self.index.reader_builder()
+                .reload_policy(ReloadPolicy::OnCommitWithDelay)
+                .try_into()?;
+            reader.searcher().num_docs()
+        };
+        self.committed.store(count, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Searches the index using BM25F and returns the top hits.
-    ///
-    /// Searches across title (weight 3), description (weight 2), headings
-    /// (weight 2), and body (weight 1). Returns up to 100 hits.
+    /// Commits only when `pending >= threshold`. Returns `Ok(true)` if a commit ran.
+    pub fn maybe_commit(&self, threshold: u64) -> Result<bool> {
+        if self.pending.load(Ordering::Relaxed) >= threshold {
+            self.commit()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn pending_count(&self)   -> u64 { self.pending.load(Ordering::Relaxed) }
+    pub fn committed_count(&self) -> u64 { self.committed.load(Ordering::Relaxed) }
+
     pub fn search(&self, query: &ParsedQuery) -> Result<Vec<RawHit>> {
-        let reader = self
-            .index
-            .reader_builder()
+        let reader = self.index.reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()?;
-
         let searcher = reader.searcher();
 
-        let query_str = if query.rewritten.is_empty() {
-            &query.original
-        } else {
-            &query.rewritten
-        };
+        let query_str = if query.rewritten.is_empty() { &query.original } else { &query.rewritten };
 
         let query_parser = QueryParser::for_index(
             &self.index,
-            vec![
-                self.schema.title,
-                self.schema.description,
-                self.schema.headings,
-                self.schema.body,
-            ],
+            vec![self.schema.title, self.schema.description, self.schema.headings, self.schema.body],
         );
 
-        let tantivy_query =
-            query_parser
-                .parse_query(query_str)
-                .map_err(|err| Error::InvalidQuery {
-                    query: query_str.to_owned(),
-                    reason: err.to_string(),
-                })?;
+        let tantivy_query = query_parser
+            .parse_query(query_str)
+            .map_err(|err| Error::InvalidQuery {
+                query:  query_str.to_owned(),
+                reason: err.to_string(),
+            })?;
 
         let top_docs = searcher.search(&tantivy_query, &TopDocs::with_limit(100))?;
 
-        let hits = top_docs
-            .into_iter()
-            .filter_map(|(score, addr)| {
-                let retrieved: TantivyDocument = searcher.doc(addr).ok()?;
-                let id = retrieved
-                    .get_first(self.schema.doc_id)
-                    .and_then(|v: &tantivy::schema::OwnedValue| v.as_u64())
-                    .map(DocumentId::new)?;
-                let url_str = retrieved
-                    .get_first(self.schema.url)
-                    .and_then(|v: &tantivy::schema::OwnedValue| v.as_str())
-                    .unwrap_or("");
-                let url = Url::parse(url_str).ok()?;
-                let title = retrieved
-                    .get_first(self.schema.title)
-                    .and_then(|v: &tantivy::schema::OwnedValue| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                let snippet = retrieved
-                    .get_first(self.schema.body)
-                    .and_then(|v: &tantivy::schema::OwnedValue| v.as_str())
-                    .map(|b: &str| b.chars().take(200).collect::<String>())
-                    .unwrap_or_default();
+        let hits = top_docs.into_iter().filter_map(|(score, addr)| {
+            let retrieved: TantivyDocument = searcher.doc(addr).ok()?;
+            let id = retrieved.get_first(self.schema.doc_id)
+                .and_then(|v: &tantivy::schema::OwnedValue| v.as_u64())
+                .map(DocumentId::new)?;
+            let url_str = retrieved.get_first(self.schema.url)
+                .and_then(|v: &tantivy::schema::OwnedValue| v.as_str())
+                .unwrap_or("");
+            let url = Url::parse(url_str).ok()?;
+            let title = retrieved.get_first(self.schema.title)
+                .and_then(|v: &tantivy::schema::OwnedValue| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let snippet = retrieved.get_first(self.schema.body)
+                .and_then(|v: &tantivy::schema::OwnedValue| v.as_str())
+                .map(|b: &str| b.chars().take(200).collect::<String>())
+                .unwrap_or_default();
 
-                Some(RawHit {
-                    id,
-                    url,
-                    score,
-                    snippet,
-                    title,
-                })
-            })
-            .collect();
+            Some(RawHit { id, url, score, snippet, title })
+        }).collect();
 
         Ok(hits)
     }
 
-    /// Returns the number of documents in the index.
-    pub fn doc_count(&self) -> Result<u64> {
-        let reader = self
-            .index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
-            .try_into()?;
-        let searcher = reader.searcher();
-        Ok(searcher.num_docs())
-    }
+    pub fn doc_count(&self) -> Result<u64> { Ok(self.committed_count()) }
 }
 
 #[cfg(test)]
@@ -243,11 +215,8 @@ mod tests {
     use super::*;
     use raithe_common::SimHash;
     use raithe_config::IndexerConfig;
-    use std::sync::Arc;
 
-    fn make_metrics() -> Arc<Metrics> {
-        Arc::new(Metrics::new().unwrap())
-    }
+    fn make_metrics() -> Arc<Metrics> { Arc::new(Metrics::new().unwrap()) }
 
     fn make_doc(id: u64, title: &str, body: &str) -> ParsedDocument {
         ParsedDocument {
@@ -265,41 +234,43 @@ mod tests {
     #[test]
     fn add_and_search_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let config = IndexerConfig::default();
-        let indexer = Indexer::new(dir.path(), &config, make_metrics()).unwrap();
-
-        indexer
-            .add(&make_doc(1, "Rust search engine", "fast reliable indexing"))
-            .unwrap();
+        let indexer = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
+        indexer.add(&make_doc(1, "Rust search engine", "fast reliable indexing")).unwrap();
         indexer.commit().unwrap();
-
-        let query = ParsedQuery::raw("search engine");
-        let hits = indexer.search(&query).unwrap();
-        assert!(!hits.is_empty());
+        let hits = indexer.search(&ParsedQuery::raw("search engine")).unwrap();
         assert_eq!(hits[0].id, DocumentId::new(1));
+        assert!(!hits[0].snippet.is_empty(), "snippet must be non-empty (body must be STORED)");
+    }
+
+    #[test]
+    fn pending_resets_on_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexer = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
+        indexer.add(&make_doc(1, "a", "one")).unwrap();
+        indexer.add(&make_doc(2, "b", "two")).unwrap();
+        assert_eq!(indexer.pending_count(), 2);
+        indexer.commit().unwrap();
+        assert_eq!(indexer.pending_count(), 0);
+        assert_eq!(indexer.committed_count(), 2);
+    }
+
+    #[test]
+    fn maybe_commit_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexer = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
+        indexer.add(&make_doc(1, "a", "one")).unwrap();
+        assert!(!indexer.maybe_commit(2).unwrap());
+        indexer.add(&make_doc(2, "b", "two")).unwrap();
+        assert!(indexer.maybe_commit(2).unwrap());
+        assert_eq!(indexer.committed_count(), 2);
     }
 
     #[test]
     fn zero_id_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let config = IndexerConfig::default();
-        let indexer = Indexer::new(dir.path(), &config, make_metrics()).unwrap();
-
+        let indexer = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
         let mut doc = make_doc(0, "title", "body");
         doc.id = DocumentId::ZERO;
         assert!(indexer.add(&doc).is_err());
-    }
-
-    #[test]
-    fn doc_count_tracks_ingestion() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = IndexerConfig::default();
-        let indexer = Indexer::new(dir.path(), &config, make_metrics()).unwrap();
-
-        indexer.add(&make_doc(1, "alpha", "one")).unwrap();
-        indexer.add(&make_doc(2, "beta", "two")).unwrap();
-        indexer.commit().unwrap();
-
-        assert_eq!(indexer.doc_count().unwrap(), 2);
     }
 }

@@ -234,138 +234,99 @@ pub struct RankedResult {
 
 // ── Ranker ────────────────────────────────────────────────────────────────────
 
-/// Three-phase ranking pipeline.
-///
-/// `RerankEngine` and `GbdtModel` are held behind `Mutex` because their
-/// mutable methods are called through the `&self` interface on `Ranker`.
 pub struct Ranker {
     config:   RankerConfig,
     gbdt:     Mutex<GbdtModel>,
-    neural:   Mutex<RerankEngine>,
+    /// `None` in Phase 1 — Phase 3 is skipped.
+    neural:   Option<Mutex<RerankEngine>>,
     _metrics: Arc<Metrics>,
 }
 
 impl Ranker {
-    /// Constructs a `Ranker`, loading the GBDT model from
-    /// `config.gbdt_model_path` if present.
-    ///
-    /// A missing model file is not an error — Phase 2 degrades to BM25F
-    /// ordering until `Ranker::train` is called with relevance labels.
-    /// Returns `Error::ModelLoad` only if a file exists but is corrupt.
-    pub fn new(
-        config:  RankerConfig,
-        neural:  RerankEngine,
-        metrics: Arc<Metrics>,
-    ) -> Result<Self> {
-        let gbdt     = GbdtModel::load(&config.gbdt_model_path)?;
-        let gbdt     = Mutex::new(gbdt);
-        let neural   = Mutex::new(neural);
-        let _metrics = metrics;
+    pub fn new(config: RankerConfig, neural: RerankEngine, metrics: Arc<Metrics>) -> Result<Self> {
+        let gbdt = GbdtModel::load(&config.gbdt_model_path)?;
         Ok(Self {
             config,
-            gbdt,
-            neural,
-            _metrics,
+            gbdt:     Mutex::new(gbdt),
+            neural:   Some(Mutex::new(neural)),
+            _metrics: metrics,
         })
     }
 
-    /// Returns `true` when a trained GBDT model is loaded.
-    pub fn is_gbdt_trained(&self) -> bool {
-        self.gbdt
-            .lock()
-            .map(|g| g.is_trained())
-            .unwrap_or(false)
+    /// Phase 1 — BM25F + GBDT only. No cross-encoder Phase 3.
+    pub fn bm25_only(config: RankerConfig, metrics: Arc<Metrics>) -> Result<Self> {
+        let gbdt = GbdtModel::load(&config.gbdt_model_path)?;
+        Ok(Self {
+            config,
+            gbdt:     Mutex::new(gbdt),
+            neural:   None,
+            _metrics: metrics,
+        })
     }
 
-    /// Trains the Phase 2 GBDT model on `samples` and persists it.
-    ///
-    /// Requires at least one sample. The model is saved to
-    /// `config.gbdt_model_path` and loaded immediately for the next `rank`
-    /// call. Call periodically as click or relevance signals accumulate.
+    pub fn is_gbdt_trained(&self) -> bool {
+        self.gbdt.lock().map(|g| g.is_trained()).unwrap_or(false)
+    }
+
     pub fn train(&self, samples: Vec<TrainingSample>) -> Result<()> {
         let mut gbdt = self.gbdt.lock().map_err(|_| Error::LockPoisoned)?;
         gbdt.train_and_save(&samples, &self.config.gbdt_model_path)
     }
 
-    /// Runs the three-phase ranking pipeline over `hits`.
-    ///
-    /// Phase 1 — BM25F scores already present in each `RawHit`.
-    /// Phase 2 — GBDT LambdaMART re-ranks all candidates.
-    /// Phase 3 — BGE cross-encoder re-ranks the top `reranker_top_k`.
-    ///
-    /// Results are returned sorted by final score descending.
     pub fn rank(
         &self,
         hits:      Vec<RawHit>,
         query:     &ParsedQuery,
         pageranks: &PageRankScores,
     ) -> Result<Vec<RankedResult>> {
-        if hits.is_empty() {
-            return Ok(Vec::new());
-        }
+        if hits.is_empty() { return Ok(Vec::new()); }
 
-        // ── Phase 2: GBDT LambdaMART re-rank ─────────────────────────────
         let query_token_count = query.tokens.len();
 
         let mut scored: Vec<(RawHit, f32)> = {
             let gbdt = self.gbdt.lock().map_err(|_| Error::LockPoisoned)?;
-            hits.into_iter()
-                .map(|hit| {
-                    let pagerank   = pageranks.get(&hit.id).copied().unwrap_or(0.0);
-                    let features   = FeatureVector::from_hit(&hit, pagerank, query_token_count);
-                    let gbdt_score = gbdt.predict(&features);
-                    (hit, gbdt_score)
-                })
-                .collect()
+            hits.into_iter().map(|hit| {
+                let pagerank   = pageranks.get(&hit.id).copied().unwrap_or(0.0);
+                let features   = FeatureVector::from_hit(&hit, pagerank, query_token_count);
+                let gbdt_score = gbdt.predict(&features);
+                (hit, gbdt_score)
+            }).collect()
         };
 
-        scored.sort_by(|(_, a), (_, b)| {
-            b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
-        // ── Phase 3: Neural cross-encoder over top-k ──────────────────────
-        let top_k     = self.config.reranker_top_k.min(scored.len());
-        let query_str = query.rewritten.as_str();
-        let candidates: Vec<&str> = scored[..top_k]
-            .iter()
-            .map(|(hit, _)| hit.snippet.as_str())
-            .collect();
-
-        let rerank_scores = {
-            let mut engine = self.neural.lock().map_err(|_| Error::LockPoisoned)?;
-            engine
-                .rerank(query_str, &candidates)
-                .map_err(|err| Error::Neural { reason: err.to_string() })?
+        // Phase 3 — only when reranker is wired.
+        let rerank_scores: Vec<f32> = match &self.neural {
+            Some(neural) => {
+                let top_k     = self.config.reranker_top_k.min(scored.len());
+                let query_str = query.rewritten.as_str();
+                let cands: Vec<&str> = scored[..top_k].iter().map(|(h, _)| h.snippet.as_str()).collect();
+                let mut engine = neural.lock().map_err(|_| Error::LockPoisoned)?;
+                let scores = engine.rerank(query_str, &cands)
+                    .map_err(|err| Error::Neural { reason: err.to_string() })?;
+                let mut padded = scores;
+                padded.resize(scored.len(), 0.0);
+                padded
+            }
+            None => vec![0.0; scored.len()],
         };
 
-        // ── Assemble final results ─────────────────────────────────────────
-        let mut results: Vec<RankedResult> = scored
-            .into_iter()
-            .enumerate()
-            .map(|(i, (hit, gbdt_score))| {
-                let rerank_score = rerank_scores.get(i).copied().unwrap_or(0.0);
-                let score = if i < top_k { rerank_score } else { gbdt_score };
-                let bm25_score = hit.score;
-                let id         = hit.id;
-                let url        = hit.url;
-                let snippet    = hit.snippet;
-                let title      = hit.title;
-                RankedResult {
-                    id,
-                    url,
-                    score,
-                    bm25_score,
-                    gbdt_score,
-                    rerank_score,
-                    snippet,
-                    title,
-                }
-            })
-            .collect();
-
-        results.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let results = scored.into_iter().enumerate().map(|(i, (hit, gbdt_score))| {
+            let rerank_score = rerank_scores.get(i).copied().unwrap_or(0.0);
+            // In BM25-only mode, fall back to gbdt_score (which falls back to BM25
+            // when the GBDT model is untrained — see GbdtModel::predict).
+            let final_score  = if rerank_score > 0.0 { rerank_score } else { gbdt_score };
+            RankedResult {
+                id:           hit.id,
+                url:          hit.url,
+                score:        final_score,
+                bm25_score:   hit.score,
+                gbdt_score,
+                rerank_score,
+                snippet:      hit.snippet,
+                title:        hit.title,
+            }
+        }).collect();
 
         Ok(results)
     }

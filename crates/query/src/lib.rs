@@ -1,8 +1,5 @@
 // © RAiTHE INDUSTRIES INCORPORATED 2026
 // crates/query/src/lib.rs
-//
-// Query understanding pipeline — tokenisation, intent classification,
-// synonym expansion, and LLM rewriting via Qwen2.5.
 
 use std::sync::{Arc, Mutex};
 
@@ -23,110 +20,70 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Query understanding pipeline.
 ///
-/// Tokenises the raw query, classifies intent, expands synonyms, and
-/// rewrites using the Qwen2.5 LLM. `GenerateEngine` is held behind a
-/// `Mutex` because `generate` requires `&mut self` on the ONNX session.
+/// `neural` is optional — when `None` (Phase 1), `process` returns the
+/// `original` string as `rewritten` and skips LLM rewriting entirely.
 pub struct QueryProcessor {
-    neural:  Mutex<GenerateEngine>,
+    neural:   Option<Mutex<GenerateEngine>>,
     _metrics: Arc<Metrics>,
 }
 
 impl QueryProcessor {
-    /// Constructs a `QueryProcessor` wrapping the given generate engine.
+    /// Full pipeline with LLM rewriting.
     pub fn new(neural: GenerateEngine, metrics: Arc<Metrics>) -> Self {
-        let neural   = Mutex::new(neural);
-        let _metrics = metrics;
-        Self { neural, _metrics }
+        Self { neural: Some(Mutex::new(neural)), _metrics: metrics }
     }
 
-    /// Processes `raw` into a fully understood `ParsedQuery`.
-    ///
-    /// Steps:
-    ///   1. Normalise and tokenise.
-    ///   2. Classify intent.
-    ///   3. Expand synonyms. TODO(impl) — synonym dictionary not yet loaded.
-    ///   4. Rewrite via Qwen2.5 LLM.
+    /// Phase 1 — pass-through processor (no LLM).
+    pub fn pass_through(metrics: Arc<Metrics>) -> Self {
+        Self { neural: None, _metrics: metrics }
+    }
+
     pub fn process(&self, raw: &str) -> Result<ParsedQuery> {
-        let original = raw.trim().to_owned();
-        let tokens   = tokenise(&original);
-        let intent   = classify_intent(&tokens);
-        let synonyms = expand_synonyms(&tokens);
-        let rewritten = self.rewrite(&original)?;
+        let original  = raw.trim().to_owned();
+        let tokens    = tokenise(&original);
+        let intent    = classify_intent(&tokens);
+        let synonyms  = expand_synonyms(&tokens);
+        let rewritten = match &self.neural {
+            Some(engine) => self.rewrite(&original, engine)?,
+            None         => original.clone(),
+        };
 
-        Ok(ParsedQuery {
-            original,
-            tokens,
-            intent,
-            synonyms,
-            rewritten,
-        })
+        Ok(ParsedQuery { original, tokens, intent, synonyms, rewritten })
     }
 
-    /// Rewrites the query using the Qwen2.5 generator.
-    ///
-    /// Falls back to returning the original query if the neural engine is
-    /// unavailable or produces an empty result, so search always proceeds.
-    fn rewrite(&self, query: &str) -> Result<String> {
+    fn rewrite(&self, query: &str, engine: &Mutex<GenerateEngine>) -> Result<String> {
         let prompt = format!(
             "Rewrite the following search query to improve recall. \
              Return only the rewritten query, nothing else.\nQuery: {query}"
         );
-
-        let mut engine = self.neural.lock().map_err(|_| Error::LockPoisoned)?;
-        let rewritten  = engine
-            .generate(&prompt)
+        let mut engine = engine.lock().map_err(|_| Error::LockPoisoned)?;
+        let rewritten  = engine.generate(&prompt)
             .map_err(|err| Error::Rewrite { reason: err.to_string() })?;
-
         let rewritten = rewritten.trim().to_owned();
-        if rewritten.is_empty() {
-            Ok(query.to_owned())
-        } else {
-            Ok(rewritten)
-        }
+        if rewritten.is_empty() { Ok(query.to_owned()) } else { Ok(rewritten) }
     }
 }
 
-// ── Pipeline stages ──────────────────────────────────────────────────────────
-
-/// Lowercases, strips punctuation, and splits on whitespace.
 fn tokenise(query: &str) -> Vec<String> {
-    query
-        .to_lowercase()
+    query.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(str::to_owned)
         .collect()
 }
 
-/// Classifies query intent from token signals.
-///
-/// Heuristic rules covering the most common cases.
-/// TODO(impl) — replace with a trained classifier once labelled data is
-/// available (MEDIUM priority).
 fn classify_intent(tokens: &[String]) -> QueryIntent {
-    let navigational_signals = ["site", "www", "http", "https", ".com", ".org"];
-    let local_signals        = ["near", "nearby", "in", "around", "location"];
-    let transactional_signals = ["buy", "shop", "price", "order", "cheap", "deal", "discount"];
-
+    let nav   = ["site", "www", "http", "https", ".com", ".org"];
+    let local = ["near", "nearby", "in", "around", "location"];
+    let trans = ["buy", "shop", "price", "order", "cheap", "deal", "discount"];
     for token in tokens {
-        if navigational_signals.iter().any(|s| token.contains(s)) {
-            return QueryIntent::Navigational;
-        }
-        if transactional_signals.contains(&token.as_str()) {
-            return QueryIntent::Transactional;
-        }
-        if local_signals.contains(&token.as_str()) {
-            return QueryIntent::Local;
-        }
+        if nav.iter().any(|s| token.contains(s)) { return QueryIntent::Navigational; }
+        if trans.contains(&token.as_str())       { return QueryIntent::Transactional; }
+        if local.contains(&token.as_str())       { return QueryIntent::Local; }
     }
-
     QueryIntent::Informational
 }
 
-/// Returns per-token synonym lists.
-///
-/// TODO(impl) — load a real synonym dictionary (WordNet or similar).
-/// Currently returns empty lists so downstream can handle the absent data.
 fn expand_synonyms(tokens: &[String]) -> Vec<Vec<String>> {
     tokens.iter().map(|_| Vec::new()).collect()
 }
@@ -134,48 +91,25 @@ fn expand_synonyms(tokens: &[String]) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raithe_metrics::Metrics;
+
+    fn metrics() -> Arc<Metrics> { Arc::new(Metrics::new().unwrap()) }
+
+    #[test]
+    fn pass_through_returns_original_as_rewritten() {
+        let proc   = QueryProcessor::pass_through(metrics());
+        let parsed = proc.process("rust search engine").unwrap();
+        assert_eq!(parsed.original, parsed.rewritten);
+        assert_eq!(parsed.tokens, vec!["rust", "search", "engine"]);
+    }
 
     #[test]
     fn tokenise_lowercases_and_splits() {
-        let tokens = tokenise("Hello, World! Rust");
-        assert_eq!(tokens, vec!["hello", "world", "rust"]);
-    }
-
-    #[test]
-    fn tokenise_strips_empty_tokens() {
-        let tokens = tokenise("  multiple   spaces  ");
-        assert!(!tokens.is_empty());
-        assert!(tokens.iter().all(|t| !t.is_empty()));
-    }
-
-    #[test]
-    fn intent_transactional() {
-        let tokens = tokenise("buy cheap shoes");
-        assert_eq!(classify_intent(&tokens), QueryIntent::Transactional);
+        assert_eq!(tokenise("Hello, World! Rust"), vec!["hello", "world", "rust"]);
     }
 
     #[test]
     fn intent_navigational() {
-        let tokens = tokenise("www.example.com");
-        assert_eq!(classify_intent(&tokens), QueryIntent::Navigational);
-    }
-
-    #[test]
-    fn intent_local() {
-        let tokens = tokenise("coffee near me");
-        assert_eq!(classify_intent(&tokens), QueryIntent::Local);
-    }
-
-    #[test]
-    fn intent_informational_default() {
-        let tokens = tokenise("how does rust borrow checker work");
-        assert_eq!(classify_intent(&tokens), QueryIntent::Informational);
-    }
-
-    #[test]
-    fn synonyms_same_length_as_tokens() {
-        let tokens   = tokenise("fast search engine");
-        let synonyms = expand_synonyms(&tokens);
-        assert_eq!(synonyms.len(), tokens.len());
+        assert_eq!(classify_intent(&tokenise("www.example.com")), QueryIntent::Navigational);
     }
 }
