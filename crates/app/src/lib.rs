@@ -26,12 +26,12 @@ use raithe_storage::{CrawlLog, DocStore};
 
 /// Phase 1 engine handles. Held by both `main` and integration tests.
 pub struct Phase1Engine {
-    pub config:   Config,
-    pub metrics:  Arc<Metrics>,
-    pub crawler:  Arc<Crawler>,
-    pub indexer:  Arc<Indexer>,
-    pub debug:    Arc<DebugStats>,
-    pub state:    Arc<AppState>,
+    pub config:  Config,
+    pub metrics: Arc<Metrics>,
+    pub crawler: Arc<Crawler>,
+    pub indexer: Arc<Indexer>,
+    pub debug:   Arc<DebugStats>,
+    pub state:   Arc<AppState>,
 }
 
 impl Phase1Engine {
@@ -45,7 +45,7 @@ impl Phase1Engine {
 
         let metrics = Arc::new(Metrics::new().context("metrics init")?);
 
-        let crawl_log = Arc::new(CrawlLog::open(&data_dir.join("crawl.log")).context("crawl log")?);
+        let crawl_log  = Arc::new(CrawlLog::open(&data_dir.join("crawl.log")).context("crawl log")?);
         let _doc_store = Arc::new(DocStore::open(&data_dir.join("docs")).context("doc store")?);
 
         let indexer = Arc::new(
@@ -74,15 +74,15 @@ impl Phase1Engine {
         let debug = Arc::new(DebugStats::new());
 
         let state = Arc::new(AppState {
-            config:    config.serving.clone(),
-            metrics:   Arc::clone(&metrics),
-            indexer:   Arc::clone(&indexer),
+            config:  config.serving.clone(),
+            metrics: Arc::clone(&metrics),
+            indexer: Arc::clone(&indexer),
             processor,
             ranker,
             instant,
             sessions,
-            crawler:   Arc::clone(&crawler),
-            debug:     Arc::clone(&debug),
+            crawler: Arc::clone(&crawler),
+            debug:   Arc::clone(&debug),
         });
 
         Ok(Self { config, metrics, crawler, indexer, debug, state })
@@ -112,7 +112,26 @@ impl Phase1Engine {
             let max_depth = self.config.crawler.max_depth;
             let threshold = self.config.engine.commit_every_docs;
             let parser    = Parser::new();
-            let mut next_doc_id: raithe_common::DocumentId = raithe_common::DocumentId::ZERO;
+
+            // Resume the in-memory monotonic ID counter past the largest
+            // persisted doc_id; without this, the counter restarts at 0 on
+            // every process boot and silently overwrites previously-indexed
+            // docs once the index is non-empty.
+            //
+            // NOTE: This is a stop-gap. The durable solution is a URL→ID
+            // registry (see PR-A0). With the registry in place, doc IDs are
+            // assigned at URL discovery and `next_doc_id` becomes irrelevant.
+            let mut next_doc_id: raithe_common::DocumentId = match indexer.max_doc_id() {
+                Ok(Some(id)) => {
+                    tracing::info!(?id, "resuming doc id space from persisted max");
+                    id
+                }
+                Ok(None) => raithe_common::DocumentId::ZERO,
+                Err(e)   => {
+                    tracing::warn!("failed to read max doc id, starting fresh: {e}");
+                    raithe_common::DocumentId::ZERO
+                }
+            };
 
             tokio::spawn(async move {
                 while let Some((fetch_result, depth)) = fetch_rx.recv().await {

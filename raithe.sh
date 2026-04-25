@@ -74,6 +74,34 @@ for arg in "$@"; do
     esac
 done
 
+# ── Phase 1 mode ──────────────────────────────────────────────────────────────
+# Phase 1 = BM25-only. The Rust binary defaults to engine.phase1_only=true
+# and does not load embedder/reranker/generator. In that mode there is no
+# reason to verify CUDA/ORT/models — `./raithe.sh` should launch in seconds.
+# `--with-neural` re-enables the full preflight; flip the default to 0 once
+# engine.phase1_only=false in the live config.
+PHASE1_ONLY="${PHASE1_ONLY:-1}"
+
+NEW_PASSTHROUGH=()
+for arg in "${PASSTHROUGH_ARGS[@]}"; do
+    case "$arg" in
+        --with-neural) PHASE1_ONLY=0 ;;
+        --phase1-only) PHASE1_ONLY=1 ;;
+        *)             NEW_PASSTHROUGH+=("$arg") ;;
+    esac
+done
+PASSTHROUGH_ARGS=("${NEW_PASSTHROUGH[@]}")
+
+if [[ $PHASE1_ONLY -eq 1 ]]; then
+    step "Phase 1 mode — skipping CUDA, ORT, and model preflight"
+    ok "BM25-only engine; pass --with-neural to enable Phase 3 preflight"
+    if [[ ! -x "$BINARY" ]]; then
+        fail "raithe-se binary not found — run: cargo build --release"
+    fi
+    step "Launching raithe-se"
+    exec "$BINARY" "${PASSTHROUGH_ARGS[@]}"
+fi
+
 # ==============================================================================
 # PREFLIGHT — system deps, pip, PATH
 # ==============================================================================

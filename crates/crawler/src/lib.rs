@@ -11,7 +11,7 @@ pub use frontier::Frontier;
 pub use policy::CrawlPolicy;
 pub use robots::RobotsCache;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,27 +50,35 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 type HostLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
-const MAX_FETCH_ATTEMPTS: u8 = 3;
+const LAST_ERRORS_CAP:    usize    = 20;
+const EMPTY_FRONTIER_NAP: Duration = Duration::from_millis(200);
+const MAX_FETCH_ATTEMPTS: u8       = 3;
 
+/// Per-URL state machine.
+///
+/// `Pending(n)` — `n` failed attempts so far; URL remains eligible for
+/// retry until `n >= MAX_FETCH_ATTEMPTS`. `Done` is terminal: either the
+/// fetch succeeded or the retry budget was exhausted. URLs in either
+/// state are skipped on subsequent frontier pops.
 #[derive(Clone, Copy, Debug)]
 enum UrlState {
-    /// Currently failing; n attempts so far. Eligible for retry until n hits MAX_FETCH_ATTEMPTS.
     Pending(u8),
-    /// Permanently skip — fetched ok or gave up after MAX_FETCH_ATTEMPTS.
     Done,
 }
 
 pub struct Crawler {
-    config:       CrawlerConfig,
-    frontier:     Frontier,
-    robots:       RobotsCache,
-    limiters:     Cache<String, Arc<HostLimiter>>,
-    scraper:      Scraper,
-    crawl_log:    Arc<CrawlLog>,
-    metrics:      Arc<Metrics>,
-    url_states:   Arc::new(Mutex::new(HashMap::new())),    
-    fetched:      Arc<AtomicU64>,
-    last_errors:  Arc<Mutex<VecDeque<String>>>,
+    config:      CrawlerConfig,
+    frontier:    Frontier,
+    robots:      RobotsCache,
+    limiters:    Cache<String, Arc<HostLimiter>>,
+    scraper:     Scraper,
+    crawl_log:   Arc<CrawlLog>,
+    metrics:     Arc<Metrics>,
+    /// Per-URL state — see `UrlState`. Replaces the older `seen_urls`
+    /// `HashSet` so transient fetch failures stay retry-eligible.
+    url_states:  Arc<Mutex<HashMap<Url, UrlState>>>,
+    fetched:     Arc<AtomicU64>,
+    last_errors: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Crawler {
@@ -100,7 +108,7 @@ impl Crawler {
             scraper,
             crawl_log,
             metrics,
-            seen_urls:   Arc::new(Mutex::new(HashSet::new())),
+            url_states:  Arc::new(Mutex::new(HashMap::new())),
             fetched:     Arc::new(AtomicU64::new(0)),
             last_errors: Arc::new(Mutex::new(VecDeque::with_capacity(LAST_ERRORS_CAP))),
         })
@@ -121,16 +129,16 @@ impl Crawler {
             let entry = match self.frontier.pop() {
                 Some(e) => e,
                 None    => {
-                    tokio::time::sleep(EMPTY_FRONTIER_NAP).await; 
-                    continue; 
+                    tokio::time::sleep(EMPTY_FRONTIER_NAP).await;
+                    continue;
                 }
             };
 
             let depth = entry.depth;
             let url   = entry.url;
 
-            // Decide whether to attempt this URL now. Permanently-Done URLs skip;
-            // Pending URLs are attempted again until MAX_FETCH_ATTEMPTS.
+            // Decide whether to attempt this URL now. `Done` URLs skip;
+            // `Pending(n)` URLs are attempted again until MAX_FETCH_ATTEMPTS.
             {
                 let mut states = self.url_states.lock().unwrap_or_else(|p| p.into_inner());
                 match states.get(&url).copied() {
@@ -146,6 +154,7 @@ impl Crawler {
 
             if !self.robots.is_allowed(&url, &self.scraper).await {
                 tracing::debug!(%url, "robots.txt disallowed — skipping");
+                self.mark_done(&url);
                 continue;
             }
 
@@ -175,15 +184,10 @@ impl Crawler {
                     self.record_error(msg);
                     self.metrics.pages_crawled_total.with_label_values(&["error"]).inc();
                     self.metrics.errors_total.with_label_values(&["crawler", "fetch"]).inc();
-                    continue; // state stays Pending(n) — will retry if rediscovered
+                    // State stays `Pending(n)` — eligible for retry if rediscovered.
+                    continue;
                 }
             };
-
-            // ... after status_class computed ...
-            {
-                let mut states = self.url_states.lock().unwrap_or_else(|p| p.into_inner());
-                states.insert(url.clone(), UrlState::Done);
-            }
 
             let status       = fetch_result.status;
             let fetched_at   = fetch_result.fetched_at;
@@ -205,6 +209,10 @@ impl Crawler {
             pages_fetched = pages_fetched.saturating_add(1);
             self.fetched.fetch_add(1, Ordering::Relaxed);
 
+            // Successful fetch — terminal state regardless of HTTP status (4xx/5xx
+            // are recorded and not retried; only network-layer errors retry).
+            self.mark_done(&url);
+
             if status == 200 {
                 let _ = tx.send((fetch_result, depth)).await;
             }
@@ -218,15 +226,16 @@ impl Crawler {
     pub fn enqueue_outlinks(&self, outlinks: &[Url], depth: u32) {
         let to_push: Vec<Url> = {
             let states = self.url_states.lock().unwrap_or_else(|p| p.into_inner());
-            outlinks.iter()
+            outlinks
+                .iter()
                 .filter(|u| !matches!(states.get(*u), Some(UrlState::Done)))
                 .cloned()
                 .collect()
         };
-        for url in to_push {
-            self.frontier.push(&url, depth);
+        for url in &to_push {
+            self.frontier.push(url, depth);
         }
-}
+    }
 
     // ── /debug/stats accessors ──────────────────────────────────────────────
 
@@ -240,6 +249,13 @@ impl Crawler {
 
     pub fn last_errors(&self) -> Vec<String> {
         self.last_errors.lock().map(|q| q.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    // ── Private helpers ─────────────────────────────────────────────────────
+
+    fn mark_done(&self, url: &Url) {
+        let mut states = self.url_states.lock().unwrap_or_else(|p| p.into_inner());
+        states.insert(url.clone(), UrlState::Done);
     }
 
     fn record_error(&self, msg: String) {
@@ -276,8 +292,25 @@ mod tests {
     #[test]
     fn status_class_buckets() {
         assert_eq!(status_class(200), "2xx");
+        assert_eq!(status_class(301), "3xx");
         assert_eq!(status_class(404), "4xx");
         assert_eq!(status_class(503), "5xx");
         assert_eq!(status_class(100), "other");
+    }
+
+    #[test]
+    fn url_state_transitions() {
+        // None → Pending(1) → Pending(2) → Pending(3) → Done
+        let mut map: HashMap<Url, UrlState> = HashMap::new();
+        let u = Url::parse("https://example.com/").unwrap();
+
+        let next = match map.get(&u).copied() {
+            None => UrlState::Pending(1),
+            Some(UrlState::Pending(n)) if n >= MAX_FETCH_ATTEMPTS => UrlState::Done,
+            Some(UrlState::Pending(n)) => UrlState::Pending(n + 1),
+            Some(UrlState::Done) => UrlState::Done,
+        };
+        map.insert(u.clone(), next);
+        assert!(matches!(map.get(&u), Some(UrlState::Pending(1))));
     }
 }

@@ -17,6 +17,11 @@ use tantivy::schema::{Field, Schema, Value, FAST, INDEXED, STORED, STRING, TEXT}
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument};
 use thiserror::Error;
 
+/// On-disk schema version. Bump when the field set changes incompatibly.
+/// `Indexer::new` writes this to `<index_path>/VERSION` on first open and
+/// refuses to open mismatched indexes — no silent corruption.
+const INDEX_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Tantivy error: {source}")]
@@ -27,6 +32,10 @@ pub enum Error {
     InvalidQuery { query: String, reason: String },
     #[error("document ID space exhausted")]
     DocIdExhausted,
+    #[error("index schema version mismatch — expected v{expected}, found v{found}; delete the index dir and re-crawl")]
+    SchemaMismatch { expected: u32, found: String },
+    #[error("index version file io error: {source}")]
+    VersionIo { #[source] source: std::io::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -54,7 +63,7 @@ impl IndexSchema {
         let title       = builder.add_text_field("title", TEXT | STORED);
         let description = builder.add_text_field("description", TEXT | STORED);
         let headings    = builder.add_text_field("headings", TEXT);
-        // BUGFIX: body must be STORED so search() can produce non-empty snippets.
+        // body must be STORED so search() can produce non-empty snippets.
         let body        = builder.add_text_field("body", TEXT | STORED);
 
         let schema = builder.build();
@@ -80,6 +89,7 @@ impl Indexer {
 
         std::fs::create_dir_all(path)
             .map_err(|err| tantivy::TantivyError::IoError(Arc::new(err)))?;
+        check_or_write_version(path)?;
 
         let dir   = tantivy::directory::MmapDirectory::open(path).map_err(tantivy::TantivyError::from)?;
         let index = Index::open_or_create(dir, schema)?;
@@ -161,6 +171,28 @@ impl Indexer {
     pub fn pending_count(&self)   -> u64 { self.pending.load(Ordering::Relaxed) }
     pub fn committed_count(&self) -> u64 { self.committed.load(Ordering::Relaxed) }
 
+    /// Returns the highest `doc_id` observed across all segments, or `None`
+    /// for an empty index. Called at startup so the in-memory monotonic
+    /// counter can resume past the last persisted ID instead of restarting
+    /// at zero (which would silently overwrite older docs on subsequent adds).
+    pub fn max_doc_id(&self) -> Result<Option<DocumentId>> {
+        let reader = self.index.reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()?;
+        let searcher = reader.searcher();
+
+        let mut max_id: Option<u64> = None;
+        for segment_reader in searcher.segment_readers() {
+            let column = segment_reader.fast_fields().u64("doc_id")?;
+            for doc in 0..segment_reader.max_doc() {
+                if let Some(val) = column.first(doc) {
+                    max_id = Some(max_id.map_or(val, |m| m.max(val)));
+                }
+            }
+        }
+        Ok(max_id.map(DocumentId::new))
+    }
+
     pub fn search(&self, query: &ParsedQuery) -> Result<Vec<RawHit>> {
         let reader = self.index.reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -208,6 +240,34 @@ impl Indexer {
     }
 
     pub fn doc_count(&self) -> Result<u64> { Ok(self.committed_count()) }
+}
+
+/// Reads `<path>/VERSION` and verifies it matches `INDEX_SCHEMA_VERSION`.
+/// Writes the current version on first open. Returns `SchemaMismatch` when
+/// an older version file is found — operator must `rm -rf` the index dir.
+fn check_or_write_version(path: &Path) -> Result<()> {
+    let v_path = path.join("VERSION");
+    match std::fs::read_to_string(&v_path) {
+        Ok(s) => {
+            let trimmed = s.trim();
+            let parsed: u32 = trimmed.parse().map_err(|_| Error::SchemaMismatch {
+                expected: INDEX_SCHEMA_VERSION,
+                found:    trimmed.to_owned(),
+            })?;
+            if parsed != INDEX_SCHEMA_VERSION {
+                return Err(Error::SchemaMismatch {
+                    expected: INDEX_SCHEMA_VERSION,
+                    found:    parsed.to_string(),
+                });
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(&v_path, INDEX_SCHEMA_VERSION.to_string())
+                .map_err(|source| Error::VersionIo { source })
+        }
+        Err(source) => Err(Error::VersionIo { source }),
+    }
 }
 
 #[cfg(test)]
@@ -272,5 +332,32 @@ mod tests {
         let mut doc = make_doc(0, "title", "body");
         doc.id = DocumentId::ZERO;
         assert!(indexer.add(&doc).is_err());
+    }
+
+    #[test]
+    fn max_doc_id_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexer = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
+        assert_eq!(indexer.max_doc_id().unwrap(), None);
+    }
+
+    #[test]
+    fn max_doc_id_after_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexer = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics()).unwrap();
+        indexer.add(&make_doc(7, "a", "one")).unwrap();
+        indexer.add(&make_doc(3, "b", "two")).unwrap();
+        indexer.add(&make_doc(42, "c", "three")).unwrap();
+        indexer.commit().unwrap();
+        assert_eq!(indexer.max_doc_id().unwrap(), Some(DocumentId::new(42)));
+    }
+
+    #[test]
+    fn schema_version_mismatch_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(dir.path().join("VERSION"), "1").unwrap();
+        let result = Indexer::new(dir.path(), &IndexerConfig::default(), make_metrics());
+        assert!(matches!(result, Err(Error::SchemaMismatch { .. })));
     }
 }

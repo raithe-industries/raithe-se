@@ -313,6 +313,8 @@ impl Ranker {
 
         let mut results: Vec<RankedResult> = scored.into_iter().enumerate().map(|(i, (hit, gbdt_score))| {
             let rerank_score = rerank_scores.get(i).copied().unwrap_or(0.0);
+            // In BM25-only mode, fall back to gbdt_score (which falls back to BM25
+            // when the GBDT model is untrained — see GbdtModel::predict).
             let final_score  = if rerank_score > 0.0 { rerank_score } else { gbdt_score };
             RankedResult {
                 id:           hit.id,
@@ -326,9 +328,11 @@ impl Ranker {
             }
         }).collect();
 
-        // Final sort by composite score — guarantees correct order regardless of phase.
+        // Final sort — guarantees correct order regardless of which phases ran.
+        // Without this, rerank could change top-K relative order but the result
+        // vec would still be in stale GBDT order.
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         Ok(results)
     }
 }
